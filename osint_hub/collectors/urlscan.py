@@ -64,7 +64,7 @@ async def collect(domain: str, settings: Settings, client: httpx.AsyncClient) ->
             headers=client_headers(settings, {"API-Key": settings.urlscan_api_key or ""}),
         )
         if response.status_code >= 400:
-            raise RuntimeError(f"URLScan HTTP {response.status_code}: {response.text[:200]}")
+            raise RuntimeError(f"URLScan HTTP {response.status_code}")
         rows = _rows(response.json(), domain)
     except Exception as exc:  # noqa: BLE001
         return failed("urlscan", str(exc), started)

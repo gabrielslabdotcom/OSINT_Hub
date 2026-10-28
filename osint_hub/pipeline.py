@@ -299,7 +299,7 @@ async def collect_domain(
         },
     )
 
-    async with httpx.AsyncClient(timeout=timeout, headers=headers, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=timeout, headers=headers, follow_redirects=False) as client:
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),

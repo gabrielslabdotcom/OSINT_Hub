@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -14,6 +16,11 @@ from osint_hub.webapp.api import router
 from osint_hub.webapp.jobs import JobRunner
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+LOOPBACK_HOSTS = ["127.0.0.1", "localhost", "::1", "[::1]"]
+
+
+def allow_remote() -> bool:
+    return os.getenv("OSINT_HUB_ALLOW_REMOTE", "").strip().lower() in {"1", "true", "yes"}
 
 
 @asynccontextmanager
@@ -43,6 +50,8 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    if not allow_remote():
+        app.add_middleware(TrustedHostMiddleware, allowed_hosts=LOOPBACK_HOSTS)
     app.include_router(router, prefix="/api")
 
     assets_dir = STATIC_DIR / "assets"

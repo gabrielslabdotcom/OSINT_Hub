@@ -26,7 +26,7 @@ async def collect(settings: Settings, client: httpx.AsyncClient, ips: list[str])
     started = time.perf_counter()
     if not settings.has_ipinfo:
         return skipped("ipinfo", "IPINFO_TOKEN not set", started)
-    headers = client_headers(settings)
+    headers = client_headers(settings, {"Authorization": f"Bearer {settings.ipinfo_token}"})
     rows: list[IpIntel] = []
     errors: list[str] = []
     try:
@@ -34,7 +34,6 @@ async def collect(settings: Settings, client: httpx.AsyncClient, ips: list[str])
             response = await get_with_retry(
                 client,
                 URL.format(ip=ip),
-                params={"token": settings.ipinfo_token},
                 headers=headers,
             )
             if response.status_code >= 400:

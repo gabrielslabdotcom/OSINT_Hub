@@ -42,7 +42,7 @@ async def collect(domain: str, settings: Settings, client: httpx.AsyncClient) ->
             headers=client_headers(settings, {"APIKEY": settings.securitytrails_api_key or ""}),
         )
         if response.status_code >= 400:
-            raise RuntimeError(f"SecurityTrails HTTP {response.status_code}: {response.text[:200]}")
+            raise RuntimeError(f"SecurityTrails HTTP {response.status_code}")
         names = _names(response.json(), domain)
     except Exception as exc:  # noqa: BLE001
         return failed("securitytrails", str(exc), started)

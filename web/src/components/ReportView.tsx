@@ -1,11 +1,21 @@
+import DOMPurify from "dompurify";
 import { marked } from "marked";
 import { useMemo } from "react";
 import { Empty } from "./DnsTable";
 
+marked.use({
+  renderer: {
+    html() {
+      return "";
+    },
+  },
+});
+
 export function ReportView({ markdown }: { markdown: string | null }) {
   const html = useMemo(() => {
     if (!markdown) return "";
-    return marked.parse(markdown, { async: false }) as string;
+    const raw = marked.parse(markdown, { async: false }) as string;
+    return DOMPurify.sanitize(raw, { USE_PROFILES: { html: true } });
   }, [markdown]);
 
   if (!markdown) {

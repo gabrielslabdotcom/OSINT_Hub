@@ -14,6 +14,13 @@ JobKind = Literal["investigate", "analyze"]
 JobStatus = Literal["queued", "running", "completed", "failed"]
 AnalyzeChoice = Literal["none", "local", "claude"]
 
+MAX_ACTIVE_JOBS = 4
+MAX_RETAINED_JOBS = 40
+
+
+class JobBusyError(RuntimeError):
+    """Raised when too many investigate/analyze jobs are already in flight."""
+
 
 @dataclass
 class Job:
@@ -56,6 +63,26 @@ class JobRunner:
         if self._worker is None or self._worker.done():
             self._worker = asyncio.create_task(self._run_worker(), name="osint-hub-jobs")
 
+    def _active_count(self) -> int:
+        return sum(1 for job in self.jobs.values() if job.status in {"queued", "running"})
+
+    def _prune(self) -> None:
+        finished = [
+            job
+            for job in self.jobs.values()
+            if job.status in {"completed", "failed"} and not job.waiters
+        ]
+        finished.sort(key=lambda job: job.finished_at or job.created_at)
+        while len(self.jobs) > MAX_RETAINED_JOBS and finished:
+            old = finished.pop(0)
+            self.jobs.pop(old.id, None)
+
+    def _enqueue(self, job: Job) -> None:
+        if self._active_count() >= MAX_ACTIVE_JOBS:
+            raise JobBusyError("Too many jobs in flight — wait for the current investigation to finish.")
+        self._prune()
+        self.jobs[job.id] = job
+
     async def submit_investigate(self, domain: str, analyze: AnalyzeChoice) -> Job:
         job = Job(
             id=str(uuid.uuid4()),
@@ -64,7 +91,7 @@ class JobRunner:
             domain=domain,
             analyze=analyze,
         )
-        self.jobs[job.id] = job
+        self._enqueue(job)
         await self._queue.put(job.id)
         return job
 
@@ -77,7 +104,7 @@ class JobRunner:
             provider=provider,
             analyze="none",
         )
-        self.jobs[job.id] = job
+        self._enqueue(job)
         await self._queue.put(job.id)
         return job
 
@@ -126,6 +153,7 @@ class JobRunner:
         await self.emit(job, closing)
         for waiter in list(job.waiters):
             await waiter.put(None)
+        self._prune()
 
     async def _run_worker(self) -> None:
         from osint_hub.webapp.worker import execute_job

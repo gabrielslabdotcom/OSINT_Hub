@@ -104,12 +104,13 @@ pip install -e ".[web]"
 osint-hub web --open
 ```
 
-Binds `127.0.0.1:8741` by default. Do not pass a LAN `--host` unless you intend to expose recon artifacts on the network.
+Binds `127.0.0.1:8741` by default and rejects non-loopback `Host` headers. A LAN `--host` requires `--allow-remote` (the console has no login).
 
 | Command | What it does |
 |---------|----------------|
-| `osint-hub web` | Serve the console + JSON API |
+| `osint-hub web` | Serve the console + JSON API on loopback |
 | `osint-hub web --open` | Also open a browser tab |
+| `osint-hub web --host 0.0.0.0 --allow-remote` | Bind on all interfaces (unauthenticated — trusted network only) |
 | `cd web && npm install && npm run dev` | Vite dev server (proxies `/api` to port 8741) |
 | `cd web && npm run build` | Rebuild static files into `osint_hub/webapp/static/` |
 
@@ -174,4 +175,6 @@ Metered collectors skip until their key is set. Caps and timeouts are under Conf
 
 ## Secrets and run data
 
-Do not commit `.env` or `runs/` (API keys and target identifiers). Copy `.env.example` locally and keep investigation artifacts off GitHub.
+Do not commit `.env` or `runs/` (API keys and target identifiers). Copy `.env.example` into the repo root (parent-directory `.env` files such as `~/.env` are not loaded). Keep investigation artifacts off GitHub.
+
+Collection rejects IP literals and public suffixes (`co.uk`, `github.io`, …) so a target must be an organization domain.

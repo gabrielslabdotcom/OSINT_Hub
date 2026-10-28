@@ -18,8 +18,8 @@ from osint_hub.pipeline import load_bundle
 from osint_hub.phase2 import patch_task, write_phase2
 from osint_hub.report import write_report
 from osint_hub.target_list import build_target_list
-from osint_hub.util import dump_model, read_json
-from osint_hub.webapp.jobs import JobRunner
+from osint_hub.util import dump_model, normalize_domain, read_json
+from osint_hub.webapp.jobs import JobBusyError, JobRunner
 from osint_hub.webapp.runs import artifacts_for, delete_all_runs, delete_run, list_runs, resolve_run_id, summarize_run
 
 router = APIRouter()
@@ -51,6 +51,13 @@ def _job_or_404(request: Request, job_id: str):
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
     return job
+
+
+def _run_dir(run_id: str):
+    try:
+        return resolve_run_id(run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Run not found") from exc
 
 
 def _probe_ollama(settings: Settings) -> bool:
@@ -119,7 +126,14 @@ def get_runs() -> dict[str, Any]:
 
 @router.post("/runs", status_code=202)
 async def start_run(body: InvestigateBody, request: Request) -> dict[str, Any]:
-    job = await _runner(request).submit_investigate(body.domain.strip(), body.analyze)
+    try:
+        domain = normalize_domain(body.domain)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        job = await _runner(request).submit_investigate(domain, body.analyze)
+    except JobBusyError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     return job.snapshot()
 
 
@@ -134,10 +148,7 @@ def delete_runs() -> dict[str, Any]:
 
 @router.get("/runs/{run_id}")
 def get_run(run_id: str) -> dict[str, Any]:
-    try:
-        run_dir = resolve_run_id(run_id)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    run_dir = _run_dir(run_id)
     summary = summarize_run(run_dir)
     if (run_dir / "bundle.json").is_file():
         bundle = load_bundle(run_dir)
@@ -165,7 +176,7 @@ def delete_one_run(run_id: str) -> dict[str, Any]:
     try:
         delete_run(run_id)
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail="Run not found") from exc
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Could not delete run directory") from exc
     return {"ok": True, "run_id": run_id}
@@ -173,19 +184,16 @@ def delete_one_run(run_id: str) -> dict[str, Any]:
 
 @router.get("/runs/{run_id}/bundle")
 def get_bundle(run_id: str) -> dict[str, Any]:
+    run_dir = _run_dir(run_id)
     try:
-        run_dir = resolve_run_id(run_id)
         return dump_model(load_bundle(run_dir))
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail="bundle.json not found") from exc
 
 
 @router.get("/runs/{run_id}/correlations")
 def get_correlations(run_id: str) -> Any:
-    try:
-        run_dir = resolve_run_id(run_id)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    run_dir = _run_dir(run_id)
     path = run_dir / "correlations.json"
     if not path.is_file():
         raise HTTPException(status_code=404, detail="correlations.json not found — generate a report first")
@@ -194,10 +202,7 @@ def get_correlations(run_id: str) -> Any:
 
 @router.get("/runs/{run_id}/report")
 def get_report(run_id: str) -> dict[str, str]:
-    try:
-        run_dir = resolve_run_id(run_id)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    run_dir = _run_dir(run_id)
     path = run_dir / "report.md"
     if not path.is_file():
         raise HTTPException(status_code=404, detail="report.md not found — generate a report first")
@@ -206,10 +211,7 @@ def get_report(run_id: str) -> dict[str, str]:
 
 @router.get("/runs/{run_id}/analysis/{provider}")
 def get_analysis(run_id: str, provider: ProviderChoice) -> Any:
-    try:
-        run_dir = resolve_run_id(run_id)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    run_dir = _run_dir(run_id)
     path = run_dir / f"analysis_{provider}.json"
     if not path.is_file():
         raise HTTPException(status_code=404, detail=f"analysis_{provider}.json not found")
@@ -218,10 +220,7 @@ def get_analysis(run_id: str, provider: ProviderChoice) -> Any:
 
 @router.get("/runs/{run_id}/targets")
 def get_targets(run_id: str) -> Any:
-    try:
-        run_dir = resolve_run_id(run_id)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    run_dir = _run_dir(run_id)
     path = run_dir / "target_list.json"
     if not path.is_file():
         raise HTTPException(status_code=404, detail="target_list.json not found")
@@ -230,40 +229,37 @@ def get_targets(run_id: str) -> Any:
 
 @router.get("/runs/{run_id}/compare")
 def get_compare(run_id: str) -> Any:
+    run_dir = _run_dir(run_id)
     try:
-        run_dir = resolve_run_id(run_id)
         return diff_analyses(run_dir)
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail="Compare artifacts not found") from exc
 
 
 @router.post("/runs/{run_id}/report")
 def post_report(run_id: str) -> dict[str, Any]:
+    run_dir = _run_dir(run_id)
     try:
-        run_dir = resolve_run_id(run_id)
         bundle = load_bundle(run_dir)
         _report, _corr, correlations = write_report(run_dir, bundle)
         return {"ok": True, "correlations": len(correlations), "artifacts": artifacts_for(run_dir)}
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail="bundle.json not found") from exc
 
 
 @router.post("/runs/{run_id}/analyze", status_code=202)
 async def post_analyze(run_id: str, body: AnalyzeBody, request: Request) -> dict[str, Any]:
+    _run_dir(run_id)
     try:
-        resolve_run_id(run_id)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    job = await _runner(request).submit_analyze(run_id, body.provider)
+        job = await _runner(request).submit_analyze(run_id, body.provider)
+    except JobBusyError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     return job.snapshot()
 
 
 @router.get("/runs/{run_id}/phase2")
 def get_phase2(run_id: str) -> Any:
-    try:
-        run_dir = resolve_run_id(run_id)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    run_dir = _run_dir(run_id)
     path = run_dir / "phase2.json"
     if not path.is_file():
         raise HTTPException(status_code=404, detail="phase2.json not found — generate a report first")
@@ -272,38 +268,38 @@ def get_phase2(run_id: str) -> Any:
 
 @router.post("/runs/{run_id}/phase2")
 def post_phase2(run_id: str) -> dict[str, Any]:
+    run_dir = _run_dir(run_id)
     try:
-        run_dir = resolve_run_id(run_id)
         bundle = load_bundle(run_dir)
         path = write_phase2(run_dir, bundle)
         return {"ok": True, "path": path.name, "phase2": read_json(path), "artifacts": artifacts_for(run_dir)}
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail="bundle.json not found") from exc
 
 
 @router.patch("/runs/{run_id}/phase2")
 def patch_phase2(run_id: str, body: Phase2TaskBody) -> dict[str, Any]:
+    run_dir = _run_dir(run_id)
     try:
-        run_dir = resolve_run_id(run_id)
         dossier = patch_task(run_dir, body.task_id, body.status)
         return dump_model(dossier)
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail="phase2.json not found — generate a report first") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/runs/{run_id}/targets")
 def post_targets(run_id: str) -> dict[str, Any]:
+    run_dir = _run_dir(run_id)
     try:
-        run_dir = resolve_run_id(run_id)
         path = build_target_list(run_dir)
         return {"ok": True, "path": path.name, "targets": read_json(path)}
     except FileNotFoundError as exc:
-        message = str(exc)
-        if "analysis_" in message:
-            message = "No analysis JSON yet — run Analyze · local or Analyze · Claude first."
-        raise HTTPException(status_code=404, detail=message) from exc
+        raise HTTPException(
+            status_code=404,
+            detail="No analysis JSON yet — run Analyze · local or Analyze · Claude first.",
+        ) from exc
 
 
 @router.get("/jobs/{job_id}")

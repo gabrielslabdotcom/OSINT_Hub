@@ -9,18 +9,33 @@ from osint_hub.models import Bundle, Correlation, HotCveMatch
 from osint_hub.util import dump_model, write_json
 
 
+def _plain(value: object, *, limit: int = 400) -> str:
+    """Neutralize HTML/markdown metacharacters in collector-controlled strings."""
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    text = text.replace("`", "'").replace("[", "(").replace("]", ")")
+    if len(text) > limit:
+        text = text[: limit - 1] + "…"
+    return text
+
+
+def _one_line(value: object, *, limit: int = 400) -> str:
+    return " ".join(_plain(value, limit=limit).split())
+
+
 def _append_hot_cve(sections: list[str], hit: HotCveMatch) -> None:
     product = " ".join(part for part in (hit.vendor, hit.product) if part).strip() or "unknown product"
     sections.append(
-        f"  {hit.cve_id}  {product}  added {hit.date_added or 'unknown'}  via {hit.source}  on {hit.matched_service}"
+        f"  {_one_line(hit.cve_id)}  {_one_line(product)}  added {_one_line(hit.date_added or 'unknown')}  "
+        f"via {_one_line(hit.source)}  on {_one_line(hit.matched_service)}"
     )
     if hit.name:
-        sections.append(f"    {hit.name}")
+        sections.append(f"    {_one_line(hit.name)}")
     if hit.evidence:
-        sections.append(f"    Evidence: {hit.evidence}")
+        sections.append(f"    Evidence: {_one_line(hit.evidence, limit=600)}")
     if hit.confidence == "confirmed":
         sections.append(
-            f"    Known-exploited CVE listed by CISA on {hit.date_added or 'an unknown date'}; "
+            f"    Known-exploited CVE listed by CISA on {_one_line(hit.date_added or 'an unknown date')}; "
             "confirm patch/exposure on this host."
         )
     else:
@@ -30,9 +45,9 @@ def _append_hot_cve(sections: list[str], hit: HotCveMatch) -> None:
 def build_report(bundle: Bundle, correlations: list[Correlation] | None = None) -> str:
     correlations = correlations if correlations is not None else correlate(bundle)
     sections: list[str] = [
-        f"# OSINT Report: {bundle.domain}",
-        f"Target: {bundle.domain}",
-        f"Collection Date: {bundle.collected_at}",
+        f"# OSINT Report: {_one_line(bundle.domain)}",
+        f"Target: {_one_line(bundle.domain)}",
+        f"Collection Date: {_one_line(bundle.collected_at)}",
         "",
         "## DNS Records",
     ]
@@ -40,39 +55,45 @@ def build_report(bundle: Bundle, correlations: list[Correlation] | None = None) 
         sections.append("  (none)")
     for record in bundle.dns_records:
         if record.priority is not None:
-            sections.append(f"  {record.rtype}: {record.name} -> {record.value} (priority {record.priority})")
+            sections.append(
+                f"  {_one_line(record.rtype)}: {_one_line(record.name)} -> {_one_line(record.value)} "
+                f"(priority {record.priority})"
+            )
         else:
-            sections.append(f"  {record.rtype}: {record.name} -> {record.value}")
+            sections.append(f"  {_one_line(record.rtype)}: {_one_line(record.name)} -> {_one_line(record.value)}")
 
     hints = extra_txt_hints(bundle.dns_records)
     if hints:
         sections.append("")
         sections.append("## DNS TXT hints")
         for hint in hints:
-            sections.append(f"  - {hint}")
+            sections.append(f"  - {_one_line(hint, limit=600)}")
 
     sections.append("")
     sections.append("## Certificate Transparency Logs")
     if not bundle.certificates:
         sections.append("  (none)")
     for cert in bundle.certificates:
-        sections.append(f"  CN={cert.common_name}  Issuer={cert.issuer}  Expires={cert.not_after}")
+        sections.append(
+            f"  CN={_one_line(cert.common_name)}  Issuer={_one_line(cert.issuer)}  "
+            f"Expires={_one_line(cert.not_after)}"
+        )
 
     sections.append("")
     sections.append("## Discovered hostnames")
     for name in bundle.discovered_hostnames:
-        sections.append(f"  - {name}")
+        sections.append(f"  - {_one_line(name)}")
 
     sections.append("")
     sections.append("## GitHub Exposure")
     if not bundle.github_findings:
         sections.append("  (none — collector skipped or no hits)")
     for finding in bundle.github_findings:
-        sections.append(f"  Repo: {finding.repo}  File: {finding.file}")
-        sections.append(f"  Match: {finding.match}")
-        sections.append(f"  Author: {finding.author or 'N/A'}")
+        sections.append(f"  Repo: {_one_line(finding.repo)}  File: {_one_line(finding.file)}")
+        sections.append(f"  Match: {_plain(finding.match, limit=1200)}")
+        sections.append(f"  Author: {_one_line(finding.author or 'N/A')}")
         if finding.url:
-            sections.append(f"  URL: {finding.url}")
+            sections.append(f"  URL: {_one_line(finding.url, limit=500)}")
         sections.append("")
 
     sections.append("## Internet-Facing Services")
@@ -82,15 +103,17 @@ def build_report(bundle: Bundle, correlations: list[Correlation] | None = None) 
     if not services:
         sections.append("  (none attributed to this domain — collector skipped, no hits, or shared/CDN only)")
     for host in attributed:
-        org = f"  org={host.org}" if host.org else ""
-        asn = f"  asn={host.asn}" if host.asn else ""
+        org = f"  org={_one_line(host.org)}" if host.org else ""
+        asn = f"  asn={_one_line(host.asn)}" if host.asn else ""
         if org or asn:
-            sections.append(f"  {host.ip}{org}{asn}")
+            sections.append(f"  {_one_line(host.ip)}{org}{asn}")
         for svc in host.services:
             if not svc.in_scope:
                 continue
             title = svc.http_title or svc.banner or "N/A"
-            sections.append(f'  {svc.ip}:{svc.port}  {svc.service}  "{title}"')
+            sections.append(
+                f'  {_one_line(svc.ip)}:{svc.port}  {_one_line(svc.service)}  "{_one_line(title)}"'
+            )
 
     if shared:
         sections.append("")
@@ -98,7 +121,7 @@ def build_report(bundle: Bundle, correlations: list[Correlation] | None = None) 
         for host in shared:
             org = host.org or "unknown"
             asn = host.asn or "unknown"
-            sections.append(f"  {host.ip}  org={org}  asn={asn}")
+            sections.append(f"  {_one_line(host.ip)}  org={_one_line(org)}  asn={_one_line(asn)}")
 
     confirmed = [hit for hit in bundle.hot_cves if hit.confidence == "confirmed"]
     suspected = [hit for hit in bundle.hot_cves if hit.confidence != "confirmed"]
@@ -128,27 +151,30 @@ def build_report(bundle: Bundle, correlations: list[Correlation] | None = None) 
                 for part in (name, row.position, row.department, row.seniority, row.type, row.source)
                 if part
             )
-            sections.append(f"  {row.email}" + (f"  {extra}" if extra else ""))
+            sections.append(f"  {_one_line(row.email)}" + (f"  {_one_line(extra)}" if extra else ""))
             if row.phone:
-                sections.append(f"    phone {row.phone}")
+                sections.append(f"    phone {_one_line(row.phone)}")
             if row.linkedin:
-                sections.append(f"    {row.linkedin}")
+                sections.append(f"    {_one_line(row.linkedin)}")
     if bundle.breaches:
         sections.append("")
         sections.append("## Breach memberships (HIBP)")
         for row in bundle.breaches:
-            sections.append(f"  {row.email}  {row.name}" + (f"  {row.breach_date}" if row.breach_date else ""))
+            sections.append(
+                f"  {_one_line(row.email)}  {_one_line(row.name)}"
+                + (f"  {_one_line(row.breach_date)}" if row.breach_date else "")
+            )
     if bundle.ip_intel:
         sections.append("")
         sections.append("## IP intel")
         for row in bundle.ip_intel:
-            bits = [row.ip]
+            bits = [_one_line(row.ip)]
             if row.org:
-                bits.append(row.org)
+                bits.append(_one_line(row.org))
             if row.asn:
-                bits.append(row.asn)
+                bits.append(_one_line(row.asn))
             if row.greynoise_classification:
-                bits.append(f"greynoise={row.greynoise_classification}")
+                bits.append(f"greynoise={_one_line(row.greynoise_classification)}")
             if row.abuse_score is not None:
                 bits.append(f"abuse={row.abuse_score}")
             sections.append("  " + "  ".join(bits))
@@ -156,13 +182,17 @@ def build_report(bundle: Bundle, correlations: list[Correlation] | None = None) 
         sections.append("")
         sections.append("## URLScan")
         for row in bundle.url_scans:
-            sections.append(f'  {row.url}  {row.ip}  "{row.title or "N/A"}"')
+            sections.append(
+                f'  {_one_line(row.url, limit=500)}  {_one_line(row.ip)}  "{_one_line(row.title or "N/A")}"'
+            )
     if bundle.leaks:
         sections.append("")
         sections.append("## LeakIX events (metadata only)")
         for row in bundle.leaks:
             host = row.hostname or row.ip
-            sections.append(f"  {host}:{row.port}  {row.kind}  {row.plugin or row.event}")
+            sections.append(
+                f"  {_one_line(host)}:{row.port}  {_one_line(row.kind)}  {_one_line(row.plugin or row.event)}"
+            )
     if bundle.vt_domain:
         vt = bundle.vt_domain
         sections.append("")
@@ -171,16 +201,16 @@ def build_report(bundle: Bundle, correlations: list[Correlation] | None = None) 
             f"  malicious={vt.malicious} suspicious={vt.suspicious} harmless={vt.harmless} undetected={vt.undetected}"
         )
         if vt.categories:
-            sections.append("  categories: " + ", ".join(vt.categories))
+            sections.append("  categories: " + ", ".join(_one_line(item) for item in vt.categories))
 
     sections.append("")
     sections.append("## Deterministic correlations")
     if not correlations:
         sections.append("  (none fired)")
     for rel in correlations:
-        sections.append(f"  Data points: {', '.join(rel.data_points)}")
-        sections.append(f"  Connection:  {rel.relationship}")
-        sections.append(f"  Relevance:   {rel.offensive_relevance}")
+        sections.append(f"  Data points: {', '.join(_one_line(point) for point in rel.data_points)}")
+        sections.append(f"  Connection:  {_one_line(rel.relationship, limit=600)}")
+        sections.append(f"  Relevance:   {_one_line(rel.offensive_relevance, limit=600)}")
         sections.append("")
 
     return "\n".join(sections).rstrip() + "\n"

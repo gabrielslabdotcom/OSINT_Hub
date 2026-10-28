@@ -43,7 +43,7 @@ async def collect(domain: str, settings: Settings, client: httpx.AsyncClient) ->
         if response.status_code == 422:
             raise RuntimeError("GitHub search query rejected (422)")
         if response.status_code >= 400:
-            raise RuntimeError(f"GitHub HTTP {response.status_code}: {response.text[:200]}")
+            raise RuntimeError(f"GitHub HTTP {response.status_code}")
         payload = response.json()
         findings = _parse_items(payload, domain)
     except Exception as exc:  # noqa: BLE001

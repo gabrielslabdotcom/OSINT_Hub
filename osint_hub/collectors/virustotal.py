@@ -67,7 +67,7 @@ async def collect(domain: str, settings: Settings, client: httpx.AsyncClient) ->
     try:
         response = await get_with_retry(client, DOMAIN_URL.format(domain=domain), headers=headers)
         if response.status_code >= 400:
-            raise RuntimeError(f"VirusTotal HTTP {response.status_code}: {response.text[:200]}")
+            raise RuntimeError(f"VirusTotal HTTP {response.status_code}")
         report = _parse_domain(response.json(), domain)
         subs = await get_with_retry(client, SUBS_URL.format(domain=domain), params={"limit": CAP}, headers=headers)
         if subs.status_code < 400:

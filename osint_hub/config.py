@@ -140,8 +140,28 @@ class Settings(BaseModel):
         return {"Authorization": f"Bearer {self.ollama_api_key}"}
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        return int(str(raw).strip())
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        return float(str(raw).strip())
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number") from exc
+
+
 def load_settings() -> Settings:
-    """Load `.env` from cwd (walking parents) or the package repo root."""
+    """Load `.env` from the package repo root only (never parent directories)."""
     _load_env_file()
 
     return Settings(
@@ -152,7 +172,7 @@ def load_settings() -> Settings:
         ollama_api_key=_empty_to_none(os.getenv("OLLAMA_API_KEY") or os.getenv("OLLAMA_API")),
         anthropic_api_key=_empty_to_none(os.getenv("ANTHROPIC_API_KEY")),
         anthropic_model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5"),
-        anthropic_max_tokens=int(os.getenv("ANTHROPIC_MAX_TOKENS", "16384")),
+        anthropic_max_tokens=_env_int("ANTHROPIC_MAX_TOKENS", 16384),
         censys_api_id=_empty_to_none(os.getenv("CENSYS_API_ID")),
         censys_api_secret=_empty_to_none(os.getenv("CENSYS_API_SECRET")),
         censys_api_token=_empty_to_none(os.getenv("CENSYS_API_TOKEN")),
@@ -169,13 +189,13 @@ def load_settings() -> Settings:
         hibp_api_key=_empty_to_none(os.getenv("HIBP_API_KEY")),
         abuseipdb_api_key=_empty_to_none(os.getenv("ABUSEIPDB_API_KEY")),
         ipinfo_token=_empty_to_none(os.getenv("IPINFO_TOKEN")),
-        github_max_results=int(os.getenv("GITHUB_MAX_RESULTS", "30")),
-        shodan_max_hosts=int(os.getenv("SHODAN_MAX_HOSTS", "15")),
-        dns_max_hosts=int(os.getenv("DNS_MAX_HOSTS", "80")),
-        hunter_max_emails=int(os.getenv("HUNTER_MAX_EMAILS", "25")),
-        people_phone_enrich_max=int(os.getenv("PEOPLE_PHONE_ENRICH_MAX", "5")),
-        http_timeout=float(os.getenv("HTTP_TIMEOUT", "30")),
-        ollama_timeout=float(os.getenv("OLLAMA_TIMEOUT", "180")),
+        github_max_results=_env_int("GITHUB_MAX_RESULTS", 30),
+        shodan_max_hosts=_env_int("SHODAN_MAX_HOSTS", 15),
+        dns_max_hosts=_env_int("DNS_MAX_HOSTS", 80),
+        hunter_max_emails=_env_int("HUNTER_MAX_EMAILS", 25),
+        people_phone_enrich_max=_env_int("PEOPLE_PHONE_ENRICH_MAX", 5),
+        http_timeout=_env_float("HTTP_TIMEOUT", 30),
+        ollama_timeout=_env_float("OLLAMA_TIMEOUT", 180),
     )
 
 

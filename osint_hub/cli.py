@@ -68,6 +68,11 @@ def build_parser() -> argparse.ArgumentParser:
     web.add_argument("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
     web.add_argument("--port", type=int, default=8741, help="Bind port (default: 8741)")
     web.add_argument("--open", action="store_true", dest="open_browser", help="Open a browser tab")
+    web.add_argument(
+        "--allow-remote",
+        action="store_true",
+        help="Allow a non-loopback bind. The console has no login — only use this on a trusted network.",
+    )
     return parser
 
 
@@ -125,11 +130,27 @@ def _cmd_web(args: argparse.Namespace) -> int:
         console.print("[red]Web extras are not installed.[/red] Run: pip install -e '.[web]'")
         console.print(f"[dim]{exc}[/dim]")
         return 1
+    if not (1 <= args.port <= 65535):
+        console.print("[red]Port must be between 1 and 65535.[/red]")
+        return 1
+    loopback = {"127.0.0.1", "localhost", "::1"}
+    if args.host not in loopback and not args.allow_remote:
+        console.print(
+            "[red]Refusing to bind beyond localhost.[/red] Pass --allow-remote if you intend to expose this console."
+        )
+        return 1
     console.print(f"[green]Investigation console[/green] http://{args.host}:{args.port}")
-    if args.host not in {"127.0.0.1", "localhost", "::1"}:
-        console.print("[yellow]Warning: binding beyond localhost exposes this recon console on the network.[/yellow]")
+    if args.host not in loopback:
+        console.print(
+            "[yellow]Warning: binding beyond localhost exposes this unauthenticated recon console on the network.[/yellow]"
+        )
     try:
-        run_server(host=args.host, port=args.port, open_browser=args.open_browser)
+        run_server(
+            host=args.host,
+            port=args.port,
+            open_browser=args.open_browser,
+            allow_remote=args.allow_remote,
+        )
     except RuntimeError as exc:
         console.print(f"[red]{exc}[/red]")
         return 1
