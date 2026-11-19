@@ -18,7 +18,8 @@ from osint_hub.pipeline import load_bundle
 from osint_hub.phase2 import patch_task, write_phase2
 from osint_hub.report import write_report
 from osint_hub.target_list import build_target_list
-from osint_hub.util import dump_model, normalize_domain, read_json
+from osint_hub.investigation import validate_investigation_request
+from osint_hub.util import dump_model, read_json
 from osint_hub.webapp.jobs import JobBusyError, JobRunner
 from osint_hub.webapp.runs import artifacts_for, delete_all_runs, delete_run, list_runs, resolve_run_id, summarize_run
 
@@ -26,10 +27,17 @@ router = APIRouter()
 
 AnalyzeChoice = Literal["none", "local", "claude"]
 ProviderChoice = Literal["local", "claude"]
+InvestigationMode = Literal["domain", "people", "both"]
+ScanDepth = Literal["quick", "standard", "full"]
 
 
 class InvestigateBody(BaseModel):
-    domain: str = Field(min_length=1, max_length=253)
+    mode: InvestigationMode = "domain"
+    domain: str | None = Field(default=None, max_length=253)
+    emails: list[str] = Field(default_factory=list, max_length=50)
+    usernames: list[str] = Field(default_factory=list, max_length=50)
+    scan_depth: ScanDepth = "standard"
+    allow_loud: bool = False
     analyze: AnalyzeChoice = "none"
 
 
@@ -100,6 +108,11 @@ def status() -> dict[str, Any]:
             "greynoise": {"configured": settings.has_greynoise, "needs_key": True, "label": "GreyNoise"},
             "abuseipdb": {"configured": settings.has_abuseipdb, "needs_key": True, "label": "AbuseIPDB"},
             "hibp": {"configured": settings.has_hibp, "needs_key": True, "label": "HIBP"},
+            "user_scanner": {
+                "configured": settings.has_user_scanner,
+                "needs_key": False,
+                "label": "User Scanner",
+            },
         },
         "llm": {
             "local": {
@@ -126,12 +139,30 @@ def get_runs() -> dict[str, Any]:
 
 @router.post("/runs", status_code=202)
 async def start_run(body: InvestigateBody, request: Request) -> dict[str, Any]:
+    settings = load_settings()
     try:
-        domain = normalize_domain(body.domain)
+        investigation = validate_investigation_request(
+            mode=body.mode,
+            domain=body.domain,
+            emails=body.emails,
+            usernames=body.usernames,
+            scan_depth=body.scan_depth,
+            allow_loud=body.allow_loud,
+            max_emails=settings.people_scan_max_emails,
+            max_usernames=settings.people_scan_max_usernames,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if investigation.mode in {"people", "both"} and not settings.has_user_scanner:
+        raise HTTPException(
+            status_code=400,
+            detail="User Scanner is not installed. Run: pip install -e '.[web,people]'",
+        )
+    analyze = body.analyze
+    if investigation.mode == "people" and analyze != "none":
+        raise HTTPException(status_code=400, detail="LLM analysis is not available for people-only runs yet")
     try:
-        job = await _runner(request).submit_investigate(domain, body.analyze)
+        job = await _runner(request).submit_investigate(investigation, analyze)
     except JobBusyError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
     return job.snapshot()
@@ -164,6 +195,7 @@ def get_run(run_id: str) -> dict[str, Any]:
             "hot_cves": len(bundle.hot_cves),
             "emails": len(bundle.emails),
             "breaches": len(bundle.breaches),
+            "profiles": len(bundle.profile_findings),
             "url_scans": len(bundle.url_scans),
             "leaks": len(bundle.leaks),
             "ip_intel": len(bundle.ip_intel),

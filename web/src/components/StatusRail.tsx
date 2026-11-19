@@ -51,8 +51,9 @@ export function StatusRail({ compact = false }: { compact?: boolean }) {
   const ollama = status.llm.local;
   const claude = status.llm.claude;
   const extras = Object.entries(status.collectors).filter(
-    ([name, row]) => !["dns", "crtsh", "github", "shodan", "kev"].includes(name) && row.needs_key,
+    ([name, row]) => !["dns", "crtsh", "github", "shodan", "kev", "user_scanner"].includes(name) && row.needs_key,
   );
+  const userScanner = status.collectors.user_scanner;
 
   return (
     <div className={`flex flex-wrap items-center gap-1.5 ${compact ? "" : "mt-3"}`}>
@@ -65,6 +66,15 @@ export function StatusRail({ compact = false }: { compact?: boolean }) {
         label="Shodan"
         ok={Boolean(shodan?.configured)}
         hint={shodan?.configured ? "SHODAN_API_KEY is set" : "Add SHODAN_API_KEY to .env"}
+      />
+      <Pill
+        label="User Scanner"
+        ok={Boolean(userScanner?.configured)}
+        hint={
+          userScanner?.configured
+            ? "user-scanner is installed"
+            : "Install with pip install -e '.[web,people]'"
+        }
       />
       {extras.map(([name, row]) => (
         <Pill

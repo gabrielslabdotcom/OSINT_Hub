@@ -21,6 +21,7 @@ dependencies = [
 [project.optional-dependencies]
 claude = ["anthropic>=0.34"]
 web = ["fastapi>=0.115", "uvicorn[standard]>=0.32", "anthropic>=0.34"]
+people = ["user-scanner>=1.5,<2"]
 
 [project.scripts]
 osint-hub = "osint_hub.cli:main"

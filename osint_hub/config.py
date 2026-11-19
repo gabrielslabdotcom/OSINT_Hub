@@ -66,6 +66,12 @@ class Settings(BaseModel):
     dns_max_hosts: int = Field(default=80, ge=1, le=500)
     hunter_max_emails: int = Field(default=25, ge=1, le=50)
     people_phone_enrich_max: int = Field(default=5, ge=0, le=25)
+    people_scan_max_emails: int = Field(default=10, ge=1, le=50)
+    people_scan_max_usernames: int = Field(default=10, ge=1, le=50)
+    people_scan_timeout: float = Field(default=120.0, ge=10.0)
+    people_scan_max_concurrency: int = Field(default=8, ge=1, le=64)
+    people_scan_allow_loud: bool = False
+    people_scan_include_nsfw: bool = False
     http_timeout: float = Field(default=30.0, ge=5.0)
     ollama_timeout: float = Field(default=180.0, ge=10.0)
     user_agent: str = "OSINT_Hub/0.1 (+authorized-recon)"
@@ -134,10 +140,23 @@ class Settings(BaseModel):
     def has_ipinfo(self) -> bool:
         return bool(self.ipinfo_token)
 
+    @property
+    def has_user_scanner(self) -> bool:
+        from osint_hub.collectors import user_scanner
+
+        return user_scanner.available()
+
     def ollama_headers(self) -> dict[str, str]:
         if not self.ollama_api_key:
             return {}
         return {"Authorization": f"Bearer {self.ollama_api_key}"}
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _env_int(name: str, default: int) -> int:
@@ -194,6 +213,12 @@ def load_settings() -> Settings:
         dns_max_hosts=_env_int("DNS_MAX_HOSTS", 80),
         hunter_max_emails=_env_int("HUNTER_MAX_EMAILS", 25),
         people_phone_enrich_max=_env_int("PEOPLE_PHONE_ENRICH_MAX", 5),
+        people_scan_max_emails=_env_int("PEOPLE_SCAN_MAX_EMAILS", 10),
+        people_scan_max_usernames=_env_int("PEOPLE_SCAN_MAX_USERNAMES", 10),
+        people_scan_timeout=_env_float("PEOPLE_SCAN_TIMEOUT", 120),
+        people_scan_max_concurrency=_env_int("PEOPLE_SCAN_MAX_CONCURRENCY", 8),
+        people_scan_allow_loud=_env_bool("PEOPLE_SCAN_ALLOW_LOUD", False),
+        people_scan_include_nsfw=_env_bool("PEOPLE_SCAN_INCLUDE_NSFW", False),
         http_timeout=_env_float("HTTP_TIMEOUT", 30),
         ollama_timeout=_env_float("OLLAMA_TIMEOUT", 180),
     )

@@ -61,9 +61,15 @@ def summarize_run(run_dir: Path, manifest: dict[str, Any] | None = None) -> dict
     if manifest is None and (run_dir / "manifest.json").is_file():
         manifest = read_json(run_dir / "manifest.json")
     manifest = manifest or {}
+    domain = manifest.get("domain") or ""
+    mode = manifest.get("mode") or "domain"
+    target_label = manifest.get("target_label") or domain or run_dir.name
     return {
         "run_id": run_dir.name,
-        "domain": manifest.get("domain"),
+        "domain": domain or None,
+        "mode": mode,
+        "target_label": target_label,
+        "scan_depth": manifest.get("scan_depth") or "standard",
         "started_at": manifest.get("started_at"),
         "finished_at": manifest.get("finished_at"),
         "collectors": manifest.get("collectors") or [],

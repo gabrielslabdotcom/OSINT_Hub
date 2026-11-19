@@ -12,7 +12,8 @@ from rich.console import Console
 from osint_hub import __version__
 from osint_hub.analyze import analyze_run, compare_analyses
 from osint_hub.config import default_runs_dir, load_settings
-from osint_hub.pipeline import collect_domain, load_bundle
+from osint_hub.investigation import validate_investigation_request
+from osint_hub.pipeline import collect_investigation, load_bundle
 from osint_hub.phase2 import write_phase2
 from osint_hub.report import write_report
 from osint_hub.target_list import build_target_list
@@ -25,6 +26,23 @@ def _add_run_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--run", required=True, help="Path to a runs/<domain>_<timestamp> directory")
 
 
+def _add_investigation_args(parser: argparse.ArgumentParser, *, require_domain: bool) -> None:
+    if require_domain:
+        parser.add_argument("domain", nargs="?", default=None, help="Authorized target domain (example.com)")
+    else:
+        parser.add_argument("domain", nargs="?", default=None, help="Authorized target domain (optional for people mode)")
+    parser.add_argument("--mode", choices=("domain", "people", "both"), default="domain")
+    parser.add_argument("--email", action="append", default=[], help="People-mode email seed (repeatable)")
+    parser.add_argument("--username", action="append", default=[], help="People-mode username seed (repeatable)")
+    parser.add_argument("--scan-depth", choices=("quick", "standard", "full"), default="standard")
+    parser.add_argument(
+        "--allow-loud",
+        action="store_true",
+        help="Allow User Scanner modules that may notify a target (also requires PEOPLE_SCAN_ALLOW_LOUD=true)",
+    )
+    parser.add_argument("--out", type=Path, default=None, help="Runs parent directory (default: ./runs)")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="osint-hub",
@@ -33,9 +51,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"OSINT_Hub {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    collect = sub.add_parser("collect", help="Run live collectors for a domain")
-    collect.add_argument("domain", help="Authorized target domain (example.com)")
-    collect.add_argument("--out", type=Path, default=None, help="Runs parent directory (default: ./runs)")
+    collect = sub.add_parser("collect", help="Run live collectors for a domain and/or people seeds")
+    _add_investigation_args(collect, require_domain=False)
 
     report = sub.add_parser("report", help="Correlate a run and write report.md")
     _add_run_arg(report)
@@ -54,8 +71,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_run_arg(compare)
 
     all_cmd = sub.add_parser("all", help="Collect + report, optionally analyze and emit targets")
-    all_cmd.add_argument("domain", help="Authorized target domain")
-    all_cmd.add_argument("--out", type=Path, default=None, help="Runs parent directory (default: ./runs)")
+    _add_investigation_args(all_cmd, require_domain=False)
     all_cmd.add_argument(
         "--analyze",
         dest="analyze_provider",
@@ -76,10 +92,24 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _cmd_collect(args: argparse.Namespace) -> int:
+def _request_from_args(args: argparse.Namespace):
     settings = load_settings()
+    return validate_investigation_request(
+        mode=args.mode,
+        domain=args.domain,
+        emails=args.email,
+        usernames=args.username,
+        scan_depth=args.scan_depth,
+        allow_loud=args.allow_loud,
+        max_emails=settings.people_scan_max_emails,
+        max_usernames=settings.people_scan_max_usernames,
+    ), settings
+
+
+def _cmd_collect(args: argparse.Namespace) -> int:
+    request, settings = _request_from_args(args)
     out = args.out or default_runs_dir()
-    asyncio.run(collect_domain(args.domain, settings, out_dir=out))
+    asyncio.run(collect_investigation(request, settings, out_dir=out))
     return 0
 
 
@@ -158,13 +188,16 @@ def _cmd_web(args: argparse.Namespace) -> int:
 
 
 def _cmd_all(args: argparse.Namespace) -> int:
-    settings = load_settings()
+    request, settings = _request_from_args(args)
     out = args.out or default_runs_dir()
-    ctx = asyncio.run(collect_domain(args.domain, settings, out_dir=out))
+    ctx = asyncio.run(collect_investigation(request, settings, out_dir=out))
     report_path, corr_path, correlations = write_report(ctx.run_dir, ctx.bundle)
     console.print(f"[green]Wrote {report_path}[/green]")
     console.print(f"[green]Wrote {corr_path}[/green] ({len(correlations)} correlations)")
     if args.analyze_provider == "none":
+        return 0
+    if request.mode == "people":
+        console.print("[yellow]Skipping LLM analysis for people-only runs[/yellow]")
         return 0
     result = analyze_run(ctx.run_dir, ctx.bundle, settings, args.analyze_provider)
     if not result:

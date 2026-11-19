@@ -126,12 +126,21 @@ class CollectorStatus(BaseModel):
     duration_ms: int | None = None
 
 
+InvestigationMode = Literal["domain", "people", "both"]
+ScanDepth = Literal["quick", "standard", "full"]
+
+
 class Manifest(BaseModel):
     domain: str
     started_at: str
     finished_at: str | None = None
     run_dir: str
     collectors: list[CollectorStatus] = Field(default_factory=list)
+    mode: InvestigationMode = "domain"
+    target_label: str = ""
+    email_seed_count: int = 0
+    username_seed_count: int = 0
+    scan_depth: ScanDepth = "standard"
 
 
 class EmailRecord(BaseModel):
@@ -228,9 +237,37 @@ class VtDomain(BaseModel):
             self.entity_id = f"vt:{self.domain}"
 
 
+class ProfileFinding(BaseModel):
+    seed_type: Literal["email", "username"]
+    seed: str
+    platform: str
+    category: str = ""
+    status: Literal["found", "not_found", "unknown", "skipped"]
+    url: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    source: str = "user_scanner"
+    entity_id: str = ""
+
+    def model_post_init(self, __context: Any) -> None:
+        if not self.entity_id:
+            platform = self.platform.lower().replace(" ", "_")
+            self.entity_id = f"profile:{self.seed_type}:{self.seed.lower()}:{platform}"
+
+
+class InvestigationRequest(BaseModel):
+    mode: InvestigationMode = "domain"
+    domain: str | None = None
+    emails: list[str] = Field(default_factory=list)
+    usernames: list[str] = Field(default_factory=list)
+    scan_depth: ScanDepth = "standard"
+    allow_loud: bool = False
+
+
 class Bundle(BaseModel):
     domain: str
     collected_at: str
+    mode: InvestigationMode = "domain"
+    target_label: str = ""
     dns_records: list[DnsRecord] = Field(default_factory=list)
     certificates: list[Certificate] = Field(default_factory=list)
     hosts: list[Host] = Field(default_factory=list)
@@ -243,6 +280,7 @@ class Bundle(BaseModel):
     url_scans: list[UrlScanRecord] = Field(default_factory=list)
     leaks: list[LeakRecord] = Field(default_factory=list)
     vt_domain: VtDomain | None = None
+    profile_findings: list[ProfileFinding] = Field(default_factory=list)
 
 
 class CollectorResult(BaseModel):
@@ -316,6 +354,7 @@ class Phase2Person(BaseModel):
     confidence: int | None = None
     why: str = ""
     breaches: list[str] = Field(default_factory=list)
+    social_profiles: list[str] = Field(default_factory=list)
     entity_ids: list[str] = Field(default_factory=list)
 
 
@@ -331,6 +370,8 @@ class Phase2MailPosture(BaseModel):
 class Phase2Dossier(BaseModel):
     domain: str
     generated_at: str
+    mode: InvestigationMode = "domain"
+    target_label: str = ""
     mail_posture: Phase2MailPosture
     tasks: list[Phase2Task] = Field(default_factory=list)
     services: list[Phase2Service] = Field(default_factory=list)

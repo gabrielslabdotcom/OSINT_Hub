@@ -6,12 +6,12 @@ Authorized targets only. Respect each API’s terms of service and rate limits. 
 
 ## What it does
 
-1. **Collect** — DNS, [crt.sh](https://crt.sh) certificate transparency, GitHub code search, and Shodan host lookups in parallel where keys exist.
-2. **Correlate** — rule-based joins (hostname alignment, IP convergence, admin-UI exposure tags, expired certs, SPF/DMARC) written to `correlations.json` **before** any LLM runs.
+1. **Collect** — domain infrastructure (DNS, crt.sh, GitHub, Shodan, …) and/or people OSINT via optional [User Scanner](https://github.com/kaifcodec/user-scanner) (email/username account leads).
+2. **Correlate** — rule-based joins written to `correlations.json` **before** any LLM runs.
 3. **Report** — one markdown document plus a unified `bundle.json`.
-4. **Analyze (optional)** — send the report plus precomputed edges to a local Ollama model or Claude; emit lab-shaped JSON and a Rich target list.
+4. **Analyze (optional)** — send the report plus precomputed edges to a local Ollama model or Claude for domain/both runs; emit lab-shaped JSON and a Rich target list.
 
-Missing API keys skip that collector with a warning. DNS and crt.sh need none.
+Missing API keys skip that collector with a warning. DNS and crt.sh need none. People mode needs the optional `people` extra.
 
 ## Setup
 
@@ -20,11 +20,11 @@ git clone https://github.com/gabrielslabdotcom/OSINT_Hub.git
 cd OSINT_Hub
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[web]"
+pip install -e ".[web,people]"
 cp .env.example .env
 ```
 
-Fill `.env` with keys you have. The web extra includes the Anthropic SDK; Claude analysis also needs `ANTHROPIC_API_KEY`.
+Fill `.env` with keys you have. The web extra includes the Anthropic SDK; Claude analysis also needs `ANTHROPIC_API_KEY`. The people extra installs MIT-licensed User Scanner for account-existence checks.
 
 On a lab Linux box with Ollama, point `OLLAMA_BASE_URL` at that host. On a real engagement, sanitize client identifiers before sending anything to a cloud model.
 
@@ -73,8 +73,24 @@ Copy `.env.example` to `.env`. Empty keys skip that collector.
 | `GITHUB_MAX_RESULTS` | 30 | GitHub code search hits |
 | `HUNTER_MAX_EMAILS` | 25 | Hunter mailbox rows |
 | `PEOPLE_PHONE_ENRICH_MAX` | 5 | Extra phone lookups for top mailboxes still missing a number (0 disables) |
+| `PEOPLE_SCAN_MAX_EMAILS` | 10 | Cap email seeds sent to User Scanner |
+| `PEOPLE_SCAN_MAX_USERNAMES` | 10 | Cap username seeds sent to User Scanner |
+| `PEOPLE_SCAN_TIMEOUT` | 120 | Overall people-scan timeout (seconds) |
+| `PEOPLE_SCAN_MAX_CONCURRENCY` | 8 | Concurrent User Scanner module checks |
+| `PEOPLE_SCAN_ALLOW_LOUD` | false | Must be true **and** `--allow-loud` / API flag to enable modules that may notify a target |
+| `PEOPLE_SCAN_INCLUDE_NSFW` | false | Include NSFW platform modules |
 | `HTTP_TIMEOUT` | 30 | Collector HTTP timeout (seconds) |
 | `OLLAMA_TIMEOUT` | 180 | Ollama request timeout (seconds) |
+
+## Investigation modes
+
+| Mode | Input | What runs |
+|------|-------|-----------|
+| `domain` | organization domain | Existing infrastructure collectors only |
+| `people` | emails and/or usernames (optional domain for Hunter/Tomba) | User Scanner + HIBP/phone enrich; no DNS/CVE claims |
+| `both` | domain (+ optional seeds) | Domain collectors, then User Scanner on seeds derived from mailboxes |
+
+Scan depth for people/both: `quick` (high-signal subset), `standard` (default), `full` (broader, slower, more noise). Account-existence hits are leads — they can be wrong and are subject to each site’s terms.
 
 ## CLI
 
@@ -84,6 +100,12 @@ osint-hub all corp.example
 
 # Full pipeline with a local model
 osint-hub all corp.example --analyze local
+
+# People OSINT
+osint-hub collect --mode people --email alice@corp.example --username alice --scan-depth standard
+
+# Domain + people
+osint-hub all corp.example --mode both --username alice --scan-depth quick
 
 # Staged
 osint-hub collect corp.example
@@ -97,10 +119,10 @@ osint-hub compare --run runs/corp.example_20261023T120000
 
 ## Web GUI
 
-Local investigation console. API keys still live in `.env`; the UI only shows whether GitHub, Shodan, Ollama, and Claude are configured.
+Local investigation console. API keys still live in `.env`; the UI shows collector readiness including User Scanner.
 
 ```bash
-pip install -e ".[web]"
+pip install -e ".[web,people]"
 osint-hub web --open
 ```
 
@@ -114,17 +136,17 @@ Binds `127.0.0.1:8741` by default and rejects non-loopback `Host` headers. A LAN
 | `cd web && npm install && npm run dev` | Vite dev server (proxies `/api` to port 8741) |
 | `cd web && npm run build` | Rebuild static files into `osint_hub/webapp/static/` |
 
-The launch pad opens a dossier, streams collector progress, then shows DNS, certificates, GitHub, Shodan, correlation threads, the markdown report, optional LLM analysis, and ranked targets. ⌘K jumps to a recent run.
+The launch pad lets you pick Domain, People, or Both, streams collector progress, then shows evidence including people OSINT leads when present. LLM analysis stays domain/both-only for now. ⌘K jumps to a recent run.
 
 ## Run artifacts
 
-Each run writes `runs/<domain>_<timestamp>/` (gitignored):
+Each run writes `runs/<slug>_<timestamp>/` (gitignored). Domain runs use the domain slug; people-only runs use `people_<timestamp>` (no email/username in the path).
 
 | File | Contents |
 |------|----------|
 | `sources/*.json` | Per-collector raw output and skip/error status |
-| `bundle.json` | Normalized DNS, certs, GitHub findings, Shodan hosts |
-| `manifest.json` | Collector status, timings, errors |
+| `bundle.json` | Normalized DNS, certs, GitHub findings, Shodan hosts, profile findings |
+| `manifest.json` | Mode, target label, collector status, timings, errors |
 | `correlations.json` | Rule-based `{data_points, relationship, offensive_relevance}` |
 | `report.md` | Human-readable consolidation |
 | `analysis_<provider>.json` | LLM JSON (after `analyze`) |
@@ -153,6 +175,7 @@ Each run writes `runs/<domain>_<timestamp>/` (gitignored):
 | abuseipdb | `ABUSEIPDB_API_KEY` | Reputation check for resolved IPs |
 | ipinfo | `IPINFO_TOKEN` | Org/ASN for resolved IPs |
 | phone_enrich | Tomba, else Hunter | Extra phones for top-ranked mailboxes still missing a number when `PEOPLE_PHONE_ENRICH_MAX` > 0 |
+| user_scanner | optional `people` extra | Email/username account-existence leads via User Scanner (MIT). Loud modules off by default |
 
 Metered collectors skip until their key is set. Caps and timeouts are under Configuration. There is no LinkedIn scraper.
 
@@ -163,6 +186,7 @@ Metered collectors skip until their key is set. Caps and timeouts are under Conf
 - Shodan title/product matches for Jenkins, Grafana, OWA, VPN, and similar admin surfaces
 - CT `not_after` in the past
 - SPF/DMARC TXT posture (intelligence only — no spoofing or exploitation)
+- Exact email/username seed ↔ User Scanner found profile (leads only — no cross-platform identity claim)
 
 ## Troubleshooting
 

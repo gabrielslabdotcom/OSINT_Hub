@@ -310,6 +310,15 @@ function PeopleGrid({ people, spoofable }: { people: Phase2Person[]; spoofable: 
             {person.linkedin && (
               <p className="mt-1 truncate font-mono text-xs text-muted">{person.linkedin}</p>
             )}
+            {(person.social_profiles?.length ?? 0) > 0 && (
+              <ul className="mt-2 space-y-1">
+                {person.social_profiles?.slice(0, 4).map((profile) => (
+                  <li key={profile} className="truncate font-mono text-xs text-teal">
+                    <Ioc value={profile} />
+                  </li>
+                ))}
+              </ul>
+            )}
             {person.breaches.length > 0 && (
               <p className="mt-2 text-xs text-amber">HIBP: {person.breaches.join(", ")}</p>
             )}

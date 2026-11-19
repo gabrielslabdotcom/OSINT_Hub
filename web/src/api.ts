@@ -44,10 +44,17 @@ export const api = {
     request<Analysis>(`/api/runs/${id}/analysis/${provider}`),
   targets: (id: string) => request<TargetRow[]>(`/api/runs/${id}/targets`),
   compare: (id: string) => request<CompareResult>(`/api/runs/${id}/compare`),
-  investigate: (domain: string, analyze: "none" | "local" | "claude") =>
+  investigate: (payload: {
+    mode: "domain" | "people" | "both";
+    domain?: string;
+    emails?: string[];
+    usernames?: string[];
+    scan_depth?: "quick" | "standard" | "full";
+    analyze: "none" | "local" | "claude";
+  }) =>
     request<JobSnapshot>("/api/runs", {
       method: "POST",
-      body: JSON.stringify({ domain, analyze }),
+      body: JSON.stringify(payload),
     }),
   deleteRun: (id: string) =>
     request<{ ok: boolean; run_id: string }>(`/api/runs/${id}`, { method: "DELETE" }),

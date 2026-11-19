@@ -32,11 +32,18 @@ from osint_hub.collectors import (
     shodan,
     tomba,
     urlscan,
+    user_scanner,
     virustotal,
 )
 from osint_hub.collectors.shodan import _merge_host
 from osint_hub.hot_cves import match_hot_cves
 from osint_hub.config import Settings, default_runs_dir
+from osint_hub.investigation import (
+    merge_people_seeds,
+    run_slug_for,
+    target_label_for,
+    validate_investigation_request,
+)
 from osint_hub.models import (
     Bundle,
     Certificate,
@@ -45,15 +52,17 @@ from osint_hub.models import (
     DnsRecord,
     EmailRecord,
     Host,
+    InvestigationRequest,
     IpIntel,
     LeakRecord,
     Manifest,
+    ProfileFinding,
     RepoFinding,
     UrlScanRecord,
     VtDomain,
 )
 from osint_hub.people import COMBINED_CAP, merge_email_records
-from osint_hub.util import dump_model, iso_now, is_in_scope, new_run_dir, normalize_domain, write_json
+from osint_hub.util import dump_model, iso_now, is_in_scope, new_run_dir, write_json
 
 console = Console()
 
@@ -227,7 +236,8 @@ def _write_source(run_dir: Path, name: str, result: CollectorResult) -> None:
 
 
 def print_summary(manifest: Manifest) -> None:
-    table = Table(title=f"OSINT_Hub collectors — {manifest.domain}")
+    label = manifest.target_label or manifest.domain or "unknown"
+    table = Table(title=f"OSINT_Hub collectors — {label}")
     table.add_column("Collector")
     table.add_column("Status")
     table.add_column("Records", justify="right")
@@ -273,19 +283,32 @@ def _result_event(
     }
 
 
-async def collect_domain(
-    domain: str,
+def _as_profiles(result: CollectorResult) -> list[ProfileFinding]:
+    if result.status != "ok" or not isinstance(result.data, dict):
+        return []
+    rows = result.data.get("findings") or []
+    return [row for row in rows if isinstance(row, ProfileFinding)]
+
+
+def _emails_from_seeds(seeds: list[str]) -> list[EmailRecord]:
+    return [EmailRecord(email=email, source="seed") for email in seeds]
+
+
+async def collect_investigation(
+    request: InvestigationRequest,
     settings: Settings,
     *,
     out_dir: Path | None = None,
     on_progress: ProgressCallback | None = None,
 ) -> RunContext:
-    domain = normalize_domain(domain)
+    label = target_label_for(request)
+    domain = request.domain or ""
     runs_root = out_dir or default_runs_dir()
-    run_dir = new_run_dir(runs_root, domain)
+    run_dir = new_run_dir(runs_root, run_slug_for(request))
     started_at = iso_now()
     timeout = httpx.Timeout(settings.http_timeout)
     headers = {"User-Agent": settings.user_agent}
+    collector_results: list[tuple[str, CollectorResult]] = []
 
     await _emit(
         on_progress,
@@ -295,9 +318,25 @@ async def collect_domain(
             "status": "running",
             "message": f"Opened run {run_dir.name}",
             "run_id": run_dir.name,
-            "domain": domain,
+            "domain": domain or None,
+            "target_label": label,
+            "mode": request.mode,
         },
     )
+
+    dns_records: list[DnsRecord] = []
+    certs: list[Certificate] = []
+    hosts: list[Host] = []
+    intel: list[IpIntel] = []
+    emails: list[EmailRecord] = []
+    breaches: list = []
+    url_scans: list[UrlScanRecord] = []
+    leaks: list[LeakRecord] = []
+    vt_domain: VtDomain | None = None
+    github_findings: list[RepoFinding] = []
+    discovered: list[str] = []
+    hot_cves = []
+    profile_findings: list[ProfileFinding] = []
 
     async with httpx.AsyncClient(timeout=timeout, headers=headers, follow_redirects=False) as client:
         with Progress(
@@ -306,162 +345,246 @@ async def collect_domain(
             console=console,
             transient=True,
         ) as progress:
-            t_dns = progress.add_task("DNS (apex)…", total=None)
-            t_crt = progress.add_task("crt.sh…", total=None)
-            await _emit(
-                on_progress,
-                {
-                    "stage": "dns_apex",
-                    "collector": "dns",
-                    "status": "running",
-                    "message": "DNS (apex)…",
-                },
-            )
-            await _emit(
-                on_progress,
-                {
-                    "stage": "crtsh",
-                    "collector": "crtsh",
-                    "status": "running",
-                    "message": "crt.sh…",
-                },
-            )
+            if request.mode in {"domain", "both"}:
+                assert request.domain
+                domain = request.domain
+                t_dns = progress.add_task("DNS (apex)…", total=None)
+                t_crt = progress.add_task("crt.sh…", total=None)
+                await _emit(on_progress, {"stage": "dns_apex", "collector": "dns", "status": "running", "message": "DNS (apex)…"})
+                await _emit(on_progress, {"stage": "crtsh", "collector": "crtsh", "status": "running", "message": "crt.sh…"})
 
-            dns_task = asyncio.create_task(dns.collect(domain, settings))
-            crt_task = asyncio.create_task(crtsh.collect(domain, settings, client))
-            dns_result, crt_result = await asyncio.gather(dns_task, crt_task)
-            progress.update(t_dns, description=f"DNS (apex) [{dns_result.status}]")
-            progress.update(t_crt, description=f"crt.sh [{crt_result.status}]")
-            progress.remove_task(t_dns)
-            progress.remove_task(t_crt)
-            await _emit(on_progress, _result_event("dns_apex", dns_result, message=f"DNS (apex) [{dns_result.status}]"))
-            await _emit(on_progress, _result_event("crtsh", crt_result, message=f"crt.sh [{crt_result.status}]"))
+                dns_task = asyncio.create_task(dns.collect(domain, settings))
+                crt_task = asyncio.create_task(crtsh.collect(domain, settings, client))
+                dns_result, crt_result = await asyncio.gather(dns_task, crt_task)
+                progress.update(t_dns, description=f"DNS (apex) [{dns_result.status}]")
+                progress.update(t_crt, description=f"crt.sh [{crt_result.status}]")
+                progress.remove_task(t_dns)
+                progress.remove_task(t_crt)
+                await _emit(on_progress, _result_event("dns_apex", dns_result, message=f"DNS (apex) [{dns_result.status}]"))
+                await _emit(on_progress, _result_event("crtsh", crt_result, message=f"crt.sh [{crt_result.status}]"))
 
-            dns_records = _as_records(dns_result)
-            certs = _as_certs(crt_result)
+                dns_records = _as_records(dns_result)
+                certs = _as_certs(crt_result)
 
-            t_subs = progress.add_task("Subdomain sources…", total=None)
-            await _emit(on_progress, {"stage": "securitytrails", "collector": "securitytrails", "status": "running", "message": "SecurityTrails…"})
-            await _emit(on_progress, {"stage": "pdcp", "collector": "pdcp", "status": "running", "message": "PDCP/Chaos…"})
-            await _emit(on_progress, {"stage": "virustotal", "collector": "virustotal", "status": "running", "message": "VirusTotal…"})
-            await _emit(on_progress, {"stage": "censys", "collector": "censys", "status": "running", "message": "Censys…"})
-            st_result, pd_result, vt_result, ce_result = await asyncio.gather(
-                securitytrails.collect(domain, settings, client),
-                pdcp.collect(domain, settings, client),
-                virustotal.collect(domain, settings, client),
-                censys.collect(domain, settings, client),
-            )
-            progress.remove_task(t_subs)
-            await _emit(on_progress, _result_event("securitytrails", st_result, message=f"SecurityTrails [{st_result.status}]"))
-            await _emit(on_progress, _result_event("pdcp", pd_result, message=f"PDCP [{pd_result.status}]"))
-            await _emit(on_progress, _result_event("virustotal", vt_result, message=f"VirusTotal [{vt_result.status}]"))
-            await _emit(on_progress, _result_event("censys", ce_result, message=f"Censys [{ce_result.status}]"))
-
-            vt_domain = _as_vt(vt_result)
-            extra_names = [
-                *_as_names(st_result),
-                *_as_names(pd_result),
-                *_as_names(ce_result),
-                *(vt_domain.subdomains if vt_domain else []),
-            ][: settings.dns_max_hosts]
-            hostnames = expand_hostnames(domain, dns_records, certs, extra_names)
-
-            extra = [name for name in hostnames if name != domain]
-            t_dns2 = progress.add_task(f"DNS ({len(extra)} discovered hosts)…", total=None)
-            await _emit(
-                on_progress,
-                {
-                    "stage": "dns_expand",
-                    "collector": "dns",
-                    "status": "running",
-                    "message": f"DNS ({len(extra)} discovered hosts)…",
-                    "records": len(extra),
-                },
-            )
-            if extra:
-                extra_result = await dns.collect(domain, settings, extra_names=extra)
-                extra_records = _as_records(extra_result)
-                seen = {(r.name, r.rtype, r.value) for r in dns_records}
-                for record in extra_records:
-                    key = (record.name, record.rtype, record.value)
-                    if key not in seen:
-                        dns_records.append(record)
-                        seen.add(key)
-                dns_result = CollectorResult(
-                    name="dns",
-                    status="ok" if dns_result.status == "ok" or extra_result.status == "ok" else extra_result.status,
-                    records=len(dns_records),
-                    error=dns_result.error or extra_result.error,
-                    duration_ms=(dns_result.duration_ms or 0) + (extra_result.duration_ms or 0),
-                    data=dns_records,
+                t_subs = progress.add_task("Subdomain sources…", total=None)
+                await _emit(on_progress, {"stage": "securitytrails", "collector": "securitytrails", "status": "running", "message": "SecurityTrails…"})
+                await _emit(on_progress, {"stage": "pdcp", "collector": "pdcp", "status": "running", "message": "PDCP/Chaos…"})
+                await _emit(on_progress, {"stage": "virustotal", "collector": "virustotal", "status": "running", "message": "VirusTotal…"})
+                await _emit(on_progress, {"stage": "censys", "collector": "censys", "status": "running", "message": "Censys…"})
+                st_result, pd_result, vt_result, ce_result = await asyncio.gather(
+                    securitytrails.collect(domain, settings, client),
+                    pdcp.collect(domain, settings, client),
+                    virustotal.collect(domain, settings, client),
+                    censys.collect(domain, settings, client),
                 )
-            progress.remove_task(t_dns2)
-            await _emit(
-                on_progress,
-                _result_event("dns_expand", dns_result, message=f"DNS expansion [{dns_result.status}]"),
-            )
+                progress.remove_task(t_subs)
+                await _emit(on_progress, _result_event("securitytrails", st_result, message=f"SecurityTrails [{st_result.status}]"))
+                await _emit(on_progress, _result_event("pdcp", pd_result, message=f"PDCP [{pd_result.status}]"))
+                await _emit(on_progress, _result_event("virustotal", vt_result, message=f"VirusTotal [{vt_result.status}]"))
+                await _emit(on_progress, _result_event("censys", ce_result, message=f"Censys [{ce_result.status}]"))
 
-            ips = extract_ips(dns_records)[: settings.shodan_max_hosts]
-            t_dom = progress.add_task("GitHub / Shodan / Hunter / Tomba / URLScan / LeakIX…", total=None)
-            await _emit(on_progress, {"stage": "github", "collector": "github", "status": "running", "message": "GitHub…"})
-            await _emit(on_progress, {"stage": "shodan", "collector": "shodan", "status": "running", "message": "Shodan…"})
-            await _emit(on_progress, {"stage": "hunter", "collector": "hunter", "status": "running", "message": "Hunter…"})
-            await _emit(on_progress, {"stage": "tomba", "collector": "tomba", "status": "running", "message": "Tomba…"})
-            await _emit(on_progress, {"stage": "urlscan", "collector": "urlscan", "status": "running", "message": "URLScan…"})
-            await _emit(on_progress, {"stage": "leakix", "collector": "leakix", "status": "running", "message": "LeakIX…"})
-            gh_result, sh_result, hu_result, tb_result, us_result, lx_result = await asyncio.gather(
-                github.collect(domain, settings, client),
-                shodan.collect(domain, settings, client, ips),
-                hunter.collect(domain, settings, client),
-                tomba.collect(domain, settings, client),
-                urlscan.collect(domain, settings, client),
-                leakix.collect(domain, settings, client),
-            )
-            progress.remove_task(t_dom)
-            await _emit(on_progress, _result_event("github", gh_result, message=f"GitHub [{gh_result.status}]"))
-            await _emit(on_progress, _result_event("shodan", sh_result, message=f"Shodan [{sh_result.status}]"))
-            await _emit(on_progress, _result_event("hunter", hu_result, message=f"Hunter [{hu_result.status}]"))
-            await _emit(on_progress, _result_event("tomba", tb_result, message=f"Tomba [{tb_result.status}]"))
-            await _emit(on_progress, _result_event("urlscan", us_result, message=f"URLScan [{us_result.status}]"))
-            await _emit(on_progress, _result_event("leakix", lx_result, message=f"LeakIX [{lx_result.status}]"))
+                vt_domain = _as_vt(vt_result)
+                extra_names = [
+                    *_as_names(st_result),
+                    *_as_names(pd_result),
+                    *_as_names(ce_result),
+                    *(vt_domain.subdomains if vt_domain else []),
+                ][: settings.dns_max_hosts]
+                hostnames = expand_hostnames(domain, dns_records, certs, extra_names)
 
-            t_ip = progress.add_task("IP intel…", total=None)
-            await _emit(on_progress, {"stage": "ipinfo", "collector": "ipinfo", "status": "running", "message": "IPinfo…"})
-            await _emit(on_progress, {"stage": "greynoise", "collector": "greynoise", "status": "running", "message": "GreyNoise…"})
-            await _emit(on_progress, {"stage": "abuseipdb", "collector": "abuseipdb", "status": "running", "message": "AbuseIPDB…"})
-            ip_result, gn_result, ab_result = await asyncio.gather(
-                ipinfo.collect(settings, client, ips),
-                greynoise.collect(settings, client, ips),
-                abuseipdb.collect(settings, client, ips),
-            )
-            progress.remove_task(t_ip)
-            await _emit(on_progress, _result_event("ipinfo", ip_result, message=f"IPinfo [{ip_result.status}]"))
-            await _emit(on_progress, _result_event("greynoise", gn_result, message=f"GreyNoise [{gn_result.status}]"))
-            await _emit(on_progress, _result_event("abuseipdb", ab_result, message=f"AbuseIPDB [{ab_result.status}]"))
+                extra = [name for name in hostnames if name != domain]
+                t_dns2 = progress.add_task(f"DNS ({len(extra)} discovered hosts)…", total=None)
+                await _emit(
+                    on_progress,
+                    {
+                        "stage": "dns_expand",
+                        "collector": "dns",
+                        "status": "running",
+                        "message": f"DNS ({len(extra)} discovered hosts)…",
+                        "records": len(extra),
+                    },
+                )
+                if extra:
+                    extra_result = await dns.collect(domain, settings, extra_names=extra)
+                    extra_records = _as_records(extra_result)
+                    seen = {(r.name, r.rtype, r.value) for r in dns_records}
+                    for record in extra_records:
+                        key = (record.name, record.rtype, record.value)
+                        if key not in seen:
+                            dns_records.append(record)
+                            seen.add(key)
+                    dns_result = CollectorResult(
+                        name="dns",
+                        status="ok" if dns_result.status == "ok" or extra_result.status == "ok" else extra_result.status,
+                        records=len(dns_records),
+                        error=dns_result.error or extra_result.error,
+                        duration_ms=(dns_result.duration_ms or 0) + (extra_result.duration_ms or 0),
+                        data=dns_records,
+                    )
+                progress.remove_task(t_dns2)
+                await _emit(on_progress, _result_event("dns_expand", dns_result, message=f"DNS expansion [{dns_result.status}]"))
 
-            emails = merge_email_records(_as_emails(hu_result), _as_emails(tb_result), cap=COMBINED_CAP)
-            t_phone = progress.add_task("Phone enrich…", total=None)
-            await _emit(
-                on_progress,
-                {"stage": "phone_enrich", "collector": "phone_enrich", "status": "running", "message": "Phone enrich…"},
-            )
-            pe_result = await phone_enrich.collect(emails, settings, client)
-            progress.remove_task(t_phone)
-            await _emit(
-                on_progress,
-                _result_event("phone_enrich", pe_result, message=f"Phone enrich [{pe_result.status}]"),
-            )
-            t_hibp = progress.add_task("HIBP…", total=None)
-            await _emit(on_progress, {"stage": "hibp", "collector": "hibp", "status": "running", "message": "HIBP…"})
-            hibp_result = await hibp.collect(settings, client, emails)
-            progress.remove_task(t_hibp)
-            await _emit(on_progress, _result_event("hibp", hibp_result, message=f"HIBP [{hibp_result.status}]"))
+                ips = extract_ips(dns_records)[: settings.shodan_max_hosts]
+                t_dom = progress.add_task("GitHub / Shodan / Hunter / Tomba / URLScan / LeakIX…", total=None)
+                await _emit(on_progress, {"stage": "github", "collector": "github", "status": "running", "message": "GitHub…"})
+                await _emit(on_progress, {"stage": "shodan", "collector": "shodan", "status": "running", "message": "Shodan…"})
+                await _emit(on_progress, {"stage": "hunter", "collector": "hunter", "status": "running", "message": "Hunter…"})
+                await _emit(on_progress, {"stage": "tomba", "collector": "tomba", "status": "running", "message": "Tomba…"})
+                await _emit(on_progress, {"stage": "urlscan", "collector": "urlscan", "status": "running", "message": "URLScan…"})
+                await _emit(on_progress, {"stage": "leakix", "collector": "leakix", "status": "running", "message": "LeakIX…"})
+                gh_result, sh_result, hu_result, tb_result, us_result, lx_result = await asyncio.gather(
+                    github.collect(domain, settings, client),
+                    shodan.collect(domain, settings, client, ips),
+                    hunter.collect(domain, settings, client),
+                    tomba.collect(domain, settings, client),
+                    urlscan.collect(domain, settings, client),
+                    leakix.collect(domain, settings, client),
+                )
+                progress.remove_task(t_dom)
+                await _emit(on_progress, _result_event("github", gh_result, message=f"GitHub [{gh_result.status}]"))
+                await _emit(on_progress, _result_event("shodan", sh_result, message=f"Shodan [{sh_result.status}]"))
+                await _emit(on_progress, _result_event("hunter", hu_result, message=f"Hunter [{hu_result.status}]"))
+                await _emit(on_progress, _result_event("tomba", tb_result, message=f"Tomba [{tb_result.status}]"))
+                await _emit(on_progress, _result_event("urlscan", us_result, message=f"URLScan [{us_result.status}]"))
+                await _emit(on_progress, _result_event("leakix", lx_result, message=f"LeakIX [{lx_result.status}]"))
 
-            t_kev = progress.add_task("CISA KEV…", total=None)
-            await _emit(on_progress, {"stage": "hot_cves", "collector": "kev", "status": "running", "message": "CISA KEV…"})
-            kev_result = await kev.collect(settings, client)
-            progress.remove_task(t_kev)
-            await _emit(on_progress, _result_event("hot_cves", kev_result, message=f"CISA KEV [{kev_result.status}]"))
+                t_ip = progress.add_task("IP intel…", total=None)
+                await _emit(on_progress, {"stage": "ipinfo", "collector": "ipinfo", "status": "running", "message": "IPinfo…"})
+                await _emit(on_progress, {"stage": "greynoise", "collector": "greynoise", "status": "running", "message": "GreyNoise…"})
+                await _emit(on_progress, {"stage": "abuseipdb", "collector": "abuseipdb", "status": "running", "message": "AbuseIPDB…"})
+                ip_result, gn_result, ab_result = await asyncio.gather(
+                    ipinfo.collect(settings, client, ips),
+                    greynoise.collect(settings, client, ips),
+                    abuseipdb.collect(settings, client, ips),
+                )
+                progress.remove_task(t_ip)
+                await _emit(on_progress, _result_event("ipinfo", ip_result, message=f"IPinfo [{ip_result.status}]"))
+                await _emit(on_progress, _result_event("greynoise", gn_result, message=f"GreyNoise [{gn_result.status}]"))
+                await _emit(on_progress, _result_event("abuseipdb", ab_result, message=f"AbuseIPDB [{ab_result.status}]"))
+
+                emails = merge_email_records(_as_emails(hu_result), _as_emails(tb_result), cap=COMBINED_CAP)
+                t_phone = progress.add_task("Phone enrich…", total=None)
+                await _emit(on_progress, {"stage": "phone_enrich", "collector": "phone_enrich", "status": "running", "message": "Phone enrich…"})
+                pe_result = await phone_enrich.collect(emails, settings, client)
+                progress.remove_task(t_phone)
+                await _emit(on_progress, _result_event("phone_enrich", pe_result, message=f"Phone enrich [{pe_result.status}]"))
+                t_hibp = progress.add_task("HIBP…", total=None)
+                await _emit(on_progress, {"stage": "hibp", "collector": "hibp", "status": "running", "message": "HIBP…"})
+                hibp_result = await hibp.collect(settings, client, emails)
+                progress.remove_task(t_hibp)
+                await _emit(on_progress, _result_event("hibp", hibp_result, message=f"HIBP [{hibp_result.status}]"))
+
+                t_kev = progress.add_task("CISA KEV…", total=None)
+                await _emit(on_progress, {"stage": "hot_cves", "collector": "kev", "status": "running", "message": "CISA KEV…"})
+                kev_result = await kev.collect(settings, client)
+                progress.remove_task(t_kev)
+                await _emit(on_progress, _result_event("hot_cves", kev_result, message=f"CISA KEV [{kev_result.status}]"))
+
+                collector_results.extend(
+                    [
+                        ("dns", dns_result),
+                        ("crtsh", crt_result),
+                        ("securitytrails", st_result),
+                        ("pdcp", pd_result),
+                        ("virustotal", vt_result),
+                        ("censys", ce_result),
+                        ("github", gh_result),
+                        ("shodan", sh_result),
+                        ("hunter", hu_result),
+                        ("tomba", tb_result),
+                        ("urlscan", us_result),
+                        ("leakix", lx_result),
+                        ("ipinfo", ip_result),
+                        ("greynoise", gn_result),
+                        ("abuseipdb", ab_result),
+                        ("phone_enrich", pe_result),
+                        ("hibp", hibp_result),
+                        ("kev", kev_result),
+                    ]
+                )
+                hosts = _as_hosts(sh_result)
+                for incoming in _censys_hosts(ce_result):
+                    existing = next((host for host in hosts if host.ip == incoming.ip), None)
+                    if existing:
+                        _merge_host(existing, incoming)
+                    else:
+                        hosts.append(incoming)
+                intel = _merge_intel(_as_intel(ip_result), _as_intel(gn_result), _as_intel(ab_result))
+                _apply_intel(hosts, intel)
+                kev_rows = list(kev_result.data or []) if kev_result.status == "ok" else []
+                hot_cves = match_hot_cves(Bundle(domain=domain, collected_at=started_at, hosts=hosts), kev_rows)
+                github_findings = _as_findings(gh_result)
+                discovered = expand_hostnames(domain, dns_records, certs, extra_names)
+                breaches = list(hibp_result.data or []) if hibp_result.status == "ok" else []
+                url_scans = _as_scans(us_result)
+                leaks = _as_leaks(lx_result)
+
+            if request.mode == "people":
+                seed_emails = list(request.emails)
+                if request.domain and (settings.has_hunter or settings.has_tomba):
+                    await _emit(on_progress, {"stage": "hunter", "collector": "hunter", "status": "running", "message": "Hunter…"})
+                    await _emit(on_progress, {"stage": "tomba", "collector": "tomba", "status": "running", "message": "Tomba…"})
+                    hu_result, tb_result = await asyncio.gather(
+                        hunter.collect(request.domain, settings, client),
+                        tomba.collect(request.domain, settings, client),
+                    )
+                    await _emit(on_progress, _result_event("hunter", hu_result, message=f"Hunter [{hu_result.status}]"))
+                    await _emit(on_progress, _result_event("tomba", tb_result, message=f"Tomba [{tb_result.status}]"))
+                    collector_results.extend([("hunter", hu_result), ("tomba", tb_result)])
+                    emails = merge_email_records(
+                        _emails_from_seeds(seed_emails),
+                        _as_emails(hu_result),
+                        _as_emails(tb_result),
+                        cap=COMBINED_CAP,
+                    )
+                else:
+                    emails = _emails_from_seeds(seed_emails)
+
+                t_phone = progress.add_task("Phone enrich…", total=None)
+                await _emit(on_progress, {"stage": "phone_enrich", "collector": "phone_enrich", "status": "running", "message": "Phone enrich…"})
+                pe_result = await phone_enrich.collect(emails, settings, client)
+                progress.remove_task(t_phone)
+                await _emit(on_progress, _result_event("phone_enrich", pe_result, message=f"Phone enrich [{pe_result.status}]"))
+                t_hibp = progress.add_task("HIBP…", total=None)
+                await _emit(on_progress, {"stage": "hibp", "collector": "hibp", "status": "running", "message": "HIBP…"})
+                hibp_result = await hibp.collect(settings, client, emails)
+                progress.remove_task(t_hibp)
+                await _emit(on_progress, _result_event("hibp", hibp_result, message=f"HIBP [{hibp_result.status}]"))
+                collector_results.extend([("phone_enrich", pe_result), ("hibp", hibp_result)])
+                breaches = list(hibp_result.data or []) if hibp_result.status == "ok" else []
+
+            if request.mode in {"people", "both"}:
+                if request.mode == "people":
+                    seeds = {
+                        "emails": list(request.emails)[: settings.people_scan_max_emails],
+                        "usernames": list(request.usernames)[: settings.people_scan_max_usernames],
+                    }
+                else:
+                    seeds = merge_people_seeds(
+                        request,
+                        mailbox_emails=emails,
+                        max_emails=settings.people_scan_max_emails,
+                        max_usernames=settings.people_scan_max_usernames,
+                    )
+                t_people = progress.add_task("User Scanner…", total=None)
+                await _emit(
+                    on_progress,
+                    {"stage": "user_scanner", "collector": "user_scanner", "status": "running", "message": "User Scanner…"},
+                )
+                us_people = await user_scanner.collect(
+                    emails=seeds["emails"],
+                    usernames=seeds["usernames"],
+                    settings=settings,
+                    scan_depth=request.scan_depth,
+                    allow_loud=request.allow_loud,
+                )
+                progress.remove_task(t_people)
+                await _emit(
+                    on_progress,
+                    _result_event("user_scanner", us_people, message=f"User Scanner [{us_people.status}]"),
+                )
+                collector_results.append(("user_scanner", us_people))
+                profile_findings = _as_profiles(us_people)
 
     await _emit(
         on_progress,
@@ -473,62 +596,27 @@ async def collect_domain(
             "run_id": run_dir.name,
         },
     )
-    extra_results = [
-        ("dns", dns_result),
-        ("crtsh", crt_result),
-        ("securitytrails", st_result),
-        ("pdcp", pd_result),
-        ("virustotal", vt_result),
-        ("censys", ce_result),
-        ("github", gh_result),
-        ("shodan", sh_result),
-        ("hunter", hu_result),
-        ("tomba", tb_result),
-        ("urlscan", us_result),
-        ("leakix", lx_result),
-        ("ipinfo", ip_result),
-        ("greynoise", gn_result),
-        ("abuseipdb", ab_result),
-        ("phone_enrich", pe_result),
-        ("hibp", hibp_result),
-        ("kev", kev_result),
-    ]
-    for name, result in extra_results:
+    for name, result in collector_results:
         _write_source(run_dir, name, result)
 
-    hosts = _as_hosts(sh_result)
-    for incoming in _censys_hosts(ce_result):
-        existing = next((host for host in hosts if host.ip == incoming.ip), None)
-        if existing:
-            _merge_host(existing, incoming)
-        else:
-            hosts.append(incoming)
-    intel = _merge_intel(_as_intel(ip_result), _as_intel(gn_result), _as_intel(ab_result))
-    _apply_intel(hosts, intel)
-    kev_rows = list(kev_result.data or []) if kev_result.status == "ok" else []
-    hot_cves = match_hot_cves(
-        Bundle(
-            domain=domain,
-            collected_at=started_at,
-            hosts=hosts,
-        ),
-        kev_rows,
-    )
     bundle = Bundle(
         domain=domain,
         collected_at=started_at,
+        mode=request.mode,
+        target_label=label,
         dns_records=dns_records,
         certificates=certs,
         hosts=hosts,
-        github_findings=_as_findings(gh_result),
-        discovered_hostnames=expand_hostnames(domain, dns_records, certs, extra_names),
+        github_findings=github_findings,
+        discovered_hostnames=discovered,
         hot_cves=hot_cves,
         emails=emails,
-        breaches=list(hibp_result.data or []) if hibp_result.status == "ok" else [],
+        breaches=breaches,
         ip_intel=intel,
-        url_scans=_as_scans(us_result),
-        leaks=_as_leaks(lx_result),
+        url_scans=url_scans,
+        leaks=leaks,
         vt_domain=vt_domain,
+        profile_findings=profile_findings,
     )
     write_json(run_dir / "bundle.json", dump_model(bundle))
 
@@ -537,7 +625,12 @@ async def collect_domain(
         started_at=started_at,
         finished_at=iso_now(),
         run_dir=str(run_dir),
-        collectors=[_status_from_result(result) for _name, result in extra_results],
+        collectors=[_status_from_result(result) for _name, result in collector_results],
+        mode=request.mode,
+        target_label=label,
+        email_seed_count=len(request.emails),
+        username_seed_count=len(request.usernames),
+        scan_depth=request.scan_depth,
     )
     write_json(run_dir / "manifest.json", dump_model(manifest))
     print_summary(manifest)
@@ -550,10 +643,23 @@ async def collect_domain(
             "status": "ok",
             "message": f"Collection complete — {run_dir.name}",
             "run_id": run_dir.name,
-            "domain": domain,
+            "domain": domain or None,
+            "target_label": label,
+            "mode": request.mode,
         },
     )
     return RunContext(domain=domain, run_dir=run_dir, bundle=bundle, manifest=manifest)
+
+
+async def collect_domain(
+    domain: str,
+    settings: Settings,
+    *,
+    out_dir: Path | None = None,
+    on_progress: ProgressCallback | None = None,
+) -> RunContext:
+    request = validate_investigation_request(mode="domain", domain=domain)
+    return await collect_investigation(request, settings, out_dir=out_dir, on_progress=on_progress)
 
 
 def load_bundle(run_dir: Path) -> Bundle:

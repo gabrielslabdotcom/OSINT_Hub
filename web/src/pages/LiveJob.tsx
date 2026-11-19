@@ -48,17 +48,23 @@ export function LiveJob() {
 
   const states = useMemo(() => statesFromEvents(events), [events]);
   const latest = events.at(-1);
-  const domain = job?.domain ?? latest?.domain ?? "target";
+  const label =
+    job?.target_label ??
+    latest?.target_label ??
+    job?.domain ??
+    latest?.domain ??
+    "target";
+  const mode = job?.mode ?? latest?.mode ?? "domain";
 
   return (
     <div className="mx-auto max-w-2xl text-center">
-      <p className="stamp text-amber">Live collection</p>
-      <h1 className="mt-3 font-mono text-3xl">{domain}</h1>
+      <p className="stamp text-amber">Live collection · {mode}</p>
+      <h1 className="mt-3 font-mono text-3xl">{label}</h1>
       <p className="mt-2 text-sm text-muted">
         {latest?.message ?? "Queued behind any in-flight investigation…"}
       </p>
       <div className="mt-8">
-        <CollectorConstellation domain={domain} states={states} caption={job?.run_id ?? undefined} />
+        <CollectorConstellation domain={label} states={states} caption={job?.run_id ?? undefined} />
       </div>
       <ol className="mt-6 max-h-48 overflow-auto border border-line bg-ink-2/40 px-4 py-3 text-left">
         {events.map((event, index) => (

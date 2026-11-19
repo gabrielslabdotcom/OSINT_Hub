@@ -12,6 +12,7 @@ import { FindingCards } from "../components/FindingCards";
 import { HostCards } from "../components/HostCards";
 import { ExtraIntel } from "../components/ExtraIntel";
 import { HotCveSection } from "../components/HotCveSection";
+import { PeopleIntel } from "../components/PeopleIntel";
 import { ReportView } from "../components/ReportView";
 import { SurfaceChips } from "../components/SurfaceChips";
 import { TargetList } from "../components/TargetList";
@@ -32,6 +33,7 @@ const SECTIONS = [
   { id: "github", label: "GitHub" },
   { id: "shodan", label: "Shodan" },
   { id: "hotcves", label: "Hot CVEs" },
+  { id: "people", label: "People" },
   { id: "intel", label: "Intel" },
   { id: "threads", label: "Threads" },
   { id: "report", label: "Report" },
@@ -188,7 +190,7 @@ export function Dossier() {
 
       {busy?.startsWith("analyze") && (
         <CollectorConstellation
-          domain={run.domain ?? run.run_id}
+          domain={run.target_label ?? run.domain ?? run.run_id}
           states={liveStates}
           caption="Waiting on the model. Collection nodes stay idle during analysis."
         />
@@ -231,6 +233,9 @@ export function Dossier() {
           </div>
           <div id="hotcves">
             <HotCveSection matches={bundle.hot_cves ?? []} shodanSkipped={shodanSkipped} />
+          </div>
+          <div id="people">
+            <PeopleIntel bundle={bundle} />
           </div>
           <div id="intel">
             <ExtraIntel bundle={bundle} />

@@ -79,12 +79,16 @@ class ReportEscapeTests(unittest.TestCase):
 
 class JobCapTests(unittest.TestCase):
     def test_rejects_over_active_cap(self) -> None:
+        from osint_hub.investigation import validate_investigation_request
+
         async def _run() -> None:
             runner = JobRunner()
             for index in range(MAX_ACTIVE_JOBS):
-                await runner.submit_investigate(f"corp{index}.example", "none")
+                request = validate_investigation_request(mode="domain", domain=f"corp{index}.example")
+                await runner.submit_investigate(request, "none")
+            overflow = validate_investigation_request(mode="domain", domain="overflow.example")
             with self.assertRaises(JobBusyError):
-                await runner.submit_investigate("overflow.example", "none")
+                await runner.submit_investigate(overflow, "none")
 
         asyncio.run(_run())
 
@@ -119,6 +123,14 @@ class ConsoleApiTests(unittest.TestCase):
             "/api/runs",
             headers={"host": "127.0.0.1"},
             json={"domain": "co.uk", "analyze": "none"},
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_people_mode_without_seeds_rejected(self) -> None:
+        response = self.client.post(
+            "/api/runs",
+            headers={"host": "127.0.0.1"},
+            json={"mode": "people", "analyze": "none"},
         )
         self.assertEqual(response.status_code, 400)
 

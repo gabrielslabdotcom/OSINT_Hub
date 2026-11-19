@@ -154,6 +154,17 @@ def compact_entity_summary(bundle: Bundle) -> dict[str, Any]:
             }
             for row in bundle.emails[:25]
         ],
+        "profile_findings": [
+            {
+                "seed_type": row.seed_type,
+                "seed": row.seed,
+                "platform": row.platform,
+                "status": row.status,
+                "url": row.url,
+            }
+            for row in bundle.profile_findings
+            if row.status == "found"
+        ][:40],
         "breaches": [{"email": row.email, "name": row.name, "breach_date": row.breach_date} for row in bundle.breaches[:25]],
         "leaks": [
             {
@@ -176,6 +187,8 @@ def analyze_run(
     settings: Settings,
     provider: str,
 ) -> dict[str, Any] | None:
+    if (bundle.mode or "domain") == "people":
+        raise ValueError("LLM analysis is not available for people-only runs yet")
     report_path = run_dir / "report.md"
     if not report_path.is_file():
         raise FileNotFoundError("report.md missing — run `osint-hub report` first")

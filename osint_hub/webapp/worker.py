@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from osint_hub.analyze import analyze_run
 from osint_hub.config import default_runs_dir, load_settings
-from osint_hub.pipeline import collect_domain, load_bundle
+from osint_hub.pipeline import collect_investigation, load_bundle
 from osint_hub.report import write_report
 from osint_hub.target_list import build_target_list
 from osint_hub.webapp.runs import resolve_run_id
@@ -27,21 +27,23 @@ async def execute_job(runner: JobRunner, job: Job) -> None:
 
 
 async def _investigate(runner: JobRunner, job: Job) -> None:
-    if not job.domain:
-        raise ValueError("Investigate job is missing a domain")
+    if job.request is None:
+        raise ValueError("Investigate job is missing a request")
     settings = load_settings()
 
     async def on_progress(event: dict) -> None:
         await runner.emit(job, event)
 
-    ctx = await collect_domain(
-        job.domain,
+    ctx = await collect_investigation(
+        job.request,
         settings,
         out_dir=default_runs_dir(),
         on_progress=on_progress,
     )
     job.run_id = ctx.run_dir.name
-    job.domain = ctx.domain
+    job.domain = ctx.domain or None
+    job.mode = job.request.mode
+    job.target_label = ctx.bundle.target_label or job.target_label
     await runner.emit(
         job,
         {

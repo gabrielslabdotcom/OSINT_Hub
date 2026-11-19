@@ -18,7 +18,7 @@ export function DossierHeader({ run }: { run: RunSummary }) {
   const [error, setError] = useState<string | null>(null);
 
   async function onDelete() {
-    const label = run.domain ?? run.run_id;
+    const label = run.target_label ?? run.domain ?? run.run_id;
     if (!window.confirm(`Permanently delete dossier ${label}?\n${run.run_id}`)) return;
     setBusy(true);
     setError(null);
@@ -63,9 +63,10 @@ export function DossierHeader({ run }: { run: RunSummary }) {
         </nav>
       </div>
       <h1 className="mt-2 font-mono text-3xl tracking-tight text-paper sm:text-4xl">
-        {run.domain ?? run.run_id}
+        {run.target_label ?? run.domain ?? run.run_id}
       </h1>
       <p className="mt-2 font-mono text-xs text-muted">
+        {(run.mode ?? "domain") + " · "}
         {run.run_id}
         {run.started_at ? ` · collected ${run.started_at}` : ""}
       </p>

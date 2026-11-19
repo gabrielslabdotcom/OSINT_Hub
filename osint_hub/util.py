@@ -165,11 +165,17 @@ def iso_now() -> str:
     return utc_now().replace(microsecond=0).isoformat()
 
 
-def new_run_dir(runs_root: Path, domain: str) -> Path:
+def sanitize_run_slug(raw: str) -> str:
+    text = re.sub(r"[^A-Za-z0-9._-]+", "-", (raw or "").strip().lower()).strip("-._")
+    return (text or "run")[:80]
+
+
+def new_run_dir(runs_root: Path, slug: str) -> Path:
     stamp = utc_stamp()
+    label = sanitize_run_slug(slug)
     last_error: OSError | None = None
     for suffix in ("", *(f"_{index}" for index in range(1, 20))):
-        path = runs_root / f"{domain}_{stamp}{suffix}"
+        path = runs_root / f"{label}_{stamp}{suffix}"
         try:
             path.mkdir(parents=True, exist_ok=False)
             (path / "sources").mkdir()

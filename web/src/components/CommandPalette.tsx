@@ -88,7 +88,7 @@ export function CommandPalette() {
                   navigate(`/runs/${run.run_id}`);
                 }}
               >
-                <span className="font-mono text-sm">{run.domain ?? run.run_id}</span>
+                <span className="font-mono text-sm">{run.target_label ?? run.domain ?? run.run_id}</span>
                 <span className="font-mono text-[11px] text-muted">{run.started_at ?? run.run_id}</span>
               </button>
             </li>

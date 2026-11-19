@@ -94,18 +94,69 @@ def _phrase_in(needle: str, hay: str) -> bool:
 def correlate(bundle: Bundle) -> list[Correlation]:
     domain = bundle.domain
     findings: list[Correlation] = []
+    mode = bundle.mode or "domain"
+    has_domain = mode in {"domain", "both"} and bool(domain)
 
-    findings.extend(_hostname_alignment(bundle, domain))
-    findings.extend(_ip_convergence(bundle))
-    findings.extend(_tooling_exposure(bundle))
-    findings.extend(_hot_cves(bundle))
-    findings.extend(_expired_certs(bundle))
-    findings.extend(_mail_auth(bundle, domain))
-    findings.extend(_vt_and_names(bundle, domain))
-    findings.extend(_ip_intel_notes(bundle))
+    if has_domain:
+        findings.extend(_hostname_alignment(bundle, domain))
+        findings.extend(_ip_convergence(bundle))
+        findings.extend(_tooling_exposure(bundle))
+        findings.extend(_hot_cves(bundle))
+        findings.extend(_expired_certs(bundle))
+        findings.extend(_mail_auth(bundle, domain))
+        findings.extend(_vt_and_names(bundle, domain))
+        findings.extend(_ip_intel_notes(bundle))
+        findings.extend(_urlscan_and_leaks(bundle))
     findings.extend(_mailbox_breaches(bundle, domain))
-    findings.extend(_urlscan_and_leaks(bundle))
+    findings.extend(_profile_seed_joins(bundle))
     return findings
+
+
+def _profile_seed_joins(bundle: Bundle) -> list[Correlation]:
+    out: list[Correlation] = []
+    emails = {row.email.lower() for row in bundle.emails}
+    for finding in bundle.profile_findings:
+        if finding.status != "found":
+            continue
+        seed = finding.seed.lower()
+        if finding.seed_type == "email" and seed in emails:
+            out.append(
+                Correlation(
+                    data_points=[f"email:{seed}", finding.entity_id],
+                    relationship=(
+                        f"Mailbox {finding.seed} also registered on {finding.platform}"
+                        + (f" ({finding.url})" if finding.url else "")
+                        + "."
+                    ),
+                    offensive_relevance=(
+                        "Exact email seed match only — treat as a lead for credential-reuse or "
+                        "account recovery review, not proof of identity across sites."
+                    ),
+                )
+            )
+            continue
+        if finding.seed_type == "username":
+            mailbox_hits = [
+                row.email
+                for row in bundle.emails
+                if row.email.split("@", 1)[0].lower() == seed
+            ]
+            if not mailbox_hits:
+                continue
+            out.append(
+                Correlation(
+                    data_points=[*[f"email:{email.lower()}" for email in mailbox_hits[:4]], finding.entity_id],
+                    relationship=(
+                        f"Username seed {finding.seed} matches mailbox local-part(s) "
+                        f"{', '.join(mailbox_hits[:4])} and a found profile on {finding.platform}."
+                    ),
+                    offensive_relevance=(
+                        "Exact local-part match only — do not assume same person across platforms "
+                        "without additional corroboration."
+                    ),
+                )
+            )
+    return out
 
 
 def _hostname_alignment(bundle: Bundle, domain: str) -> list[Correlation]:

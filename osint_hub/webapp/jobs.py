@@ -8,6 +8,8 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from osint_hub.investigation import request_summary, target_label_for
+from osint_hub.models import InvestigationRequest
 from osint_hub.util import iso_now
 
 JobKind = Literal["investigate", "analyze"]
@@ -28,9 +30,12 @@ class Job:
     kind: JobKind
     status: JobStatus
     domain: str | None = None
+    target_label: str | None = None
+    mode: str | None = None
     run_id: str | None = None
     analyze: AnalyzeChoice = "none"
     provider: str | None = None
+    request: InvestigationRequest | None = None
     error: str | None = None
     created_at: str = field(default_factory=iso_now)
     finished_at: str | None = None
@@ -38,11 +43,17 @@ class Job:
     waiters: list[asyncio.Queue[dict[str, Any] | None]] = field(default_factory=list)
 
     def snapshot(self) -> dict[str, Any]:
+        summary = request_summary(self.request) if self.request is not None else {}
         return {
             "job_id": self.id,
             "kind": self.kind,
             "status": self.status,
             "domain": self.domain,
+            "target_label": self.target_label or summary.get("target_label"),
+            "mode": self.mode or summary.get("mode"),
+            "scan_depth": summary.get("scan_depth"),
+            "email_seed_count": summary.get("email_seed_count"),
+            "username_seed_count": summary.get("username_seed_count"),
             "run_id": self.run_id,
             "analyze": self.analyze,
             "provider": self.provider,
@@ -83,13 +94,16 @@ class JobRunner:
         self._prune()
         self.jobs[job.id] = job
 
-    async def submit_investigate(self, domain: str, analyze: AnalyzeChoice) -> Job:
+    async def submit_investigate(self, request: InvestigationRequest, analyze: AnalyzeChoice) -> Job:
         job = Job(
             id=str(uuid.uuid4()),
             kind="investigate",
             status="queued",
-            domain=domain,
+            domain=request.domain,
+            target_label=target_label_for(request),
+            mode=request.mode,
             analyze=analyze,
+            request=request,
         )
         self._enqueue(job)
         await self._queue.put(job.id)
@@ -117,6 +131,10 @@ class JobRunner:
             job.run_id = str(payload["run_id"])
         if job.domain is None and payload.get("domain"):
             job.domain = str(payload["domain"])
+        if job.target_label is None and payload.get("target_label"):
+            job.target_label = str(payload["target_label"])
+        if job.mode is None and payload.get("mode"):
+            job.mode = str(payload["mode"])
         job.events.append(payload)
         for waiter in list(job.waiters):
             await waiter.put(payload)
@@ -149,6 +167,8 @@ class JobRunner:
             "message": error or f"Job {status}",
             "run_id": job.run_id,
             "domain": job.domain,
+            "target_label": job.target_label,
+            "mode": job.mode,
         }
         await self.emit(job, closing)
         for waiter in list(job.waiters):

@@ -30,6 +30,7 @@ const EXTRA: { id: CollectorName; label: string }[] = [
   { id: "greynoise", label: "GreyNoise" },
   { id: "abuseipdb", label: "AbuseIPDB" },
   { id: "hibp", label: "HIBP" },
+  { id: "user_scanner", label: "User Scanner" },
 ];
 
 const IDLE: Record<CollectorName, CollectorState> = {
@@ -51,6 +52,7 @@ const IDLE: Record<CollectorName, CollectorState> = {
   greynoise: "idle",
   abuseipdb: "idle",
   hibp: "idle",
+  user_scanner: "idle",
 };
 
 export function statesFromEvents(events: JobEvent[]): Record<CollectorName, CollectorState> {

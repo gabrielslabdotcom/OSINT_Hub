@@ -90,6 +90,21 @@ def _people(bundle: Bundle, mail: Phase2MailPosture) -> list[Phase2Person]:
         if mail.spoofable:
             reasons.append("mail auth does not reject spoofing")
         name = " ".join(part for part in (row.first_name, row.last_name) if part)
+        profiles = [
+            finding.url or f"{finding.platform}:{finding.status}"
+            for finding in bundle.profile_findings
+            if finding.status == "found"
+            and (
+                (finding.seed_type == "email" and finding.seed.lower() == row.email.lower())
+                or (
+                    finding.seed_type == "username"
+                    and finding.seed.lower() == row.email.split("@", 1)[0].lower()
+                )
+            )
+        ]
+        if profiles:
+            reasons.append("exact-match User Scanner profile lead(s)")
+            score += 1
         people.append(
             Phase2Person(
                 rank=score,
@@ -107,6 +122,7 @@ def _people(bundle: Bundle, mail: Phase2MailPosture) -> list[Phase2Person]:
                 confidence=row.confidence,
                 why="; ".join(reasons),
                 breaches=hits,
+                social_profiles=profiles[:8],
                 entity_ids=[row.entity_id],
             )
         )
@@ -363,18 +379,21 @@ def _preserve_status(run_dir: Path, dossier: Phase2Dossier) -> None:
 
 def compile_phase2(bundle: Bundle, run_dir: Path, correlations: list[Correlation] | None = None) -> Phase2Dossier:
     del correlations
+    mode = bundle.mode or "domain"
     mail = _mail_posture(bundle)
-    services = _service_cards(bundle, run_dir)
+    services = _service_cards(bundle, run_dir) if mode in {"domain", "both"} and bundle.domain else []
     people = _people(bundle, mail)
     if not mail.spoofable and not people:
         people = []
     dossier = Phase2Dossier(
         domain=bundle.domain,
         generated_at=iso_now(),
+        mode=mode,
+        target_label=bundle.target_label or bundle.domain or "unknown",
         mail_posture=mail,
         services=services,
         people=people,
-        tasks=_tasks(bundle, mail, services, people),
+        tasks=_tasks(bundle, mail, services, people) if mode in {"domain", "both"} else [],
     )
     _preserve_status(run_dir, dossier)
     return dossier

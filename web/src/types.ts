@@ -16,8 +16,11 @@ export type CollectorName =
   | "ipinfo"
   | "greynoise"
   | "abuseipdb"
-  | "hibp";
+  | "hibp"
+  | "user_scanner";
 export type CollectorState = "idle" | "running" | "ok" | "skipped" | "error";
+export type InvestigationMode = "domain" | "people" | "both";
+export type ScanDepth = "quick" | "standard" | "full";
 
 export type CollectorStatus = {
   name: string;
@@ -55,6 +58,9 @@ export type Artifacts = {
 export type RunSummary = {
   run_id: string;
   domain: string | null;
+  mode?: InvestigationMode;
+  target_label?: string | null;
+  scan_depth?: ScanDepth;
   started_at: string | null;
   finished_at: string | null;
   collectors: CollectorStatus[];
@@ -212,9 +218,23 @@ export type VtDomain = {
   entity_id: string;
 };
 
+export type ProfileFinding = {
+  seed_type: "email" | "username";
+  seed: string;
+  platform: string;
+  category?: string;
+  status: "found" | "not_found" | "unknown" | "skipped";
+  url?: string;
+  metadata?: Record<string, unknown>;
+  source?: string;
+  entity_id: string;
+};
+
 export type Bundle = {
   domain: string;
   collected_at: string;
+  mode?: InvestigationMode;
+  target_label?: string;
   dns_records: DnsRecord[];
   certificates: Certificate[];
   hosts: Host[];
@@ -227,6 +247,7 @@ export type Bundle = {
   url_scans?: UrlScanRecord[];
   leaks?: LeakRecord[];
   vt_domain?: VtDomain | null;
+  profile_findings?: ProfileFinding[];
 };
 
 export type Correlation = {
@@ -298,6 +319,8 @@ export type JobEvent = {
   error?: string | null;
   run_id?: string | null;
   domain?: string | null;
+  target_label?: string | null;
+  mode?: InvestigationMode | null;
   provider?: string | null;
   duration_ms?: number | null;
 };
@@ -367,6 +390,7 @@ export type Phase2Person = {
   confidence: number | null;
   why: string;
   breaches: string[];
+  social_profiles?: string[];
   entity_ids: string[];
 };
 
@@ -382,10 +406,21 @@ export type Phase2MailPosture = {
 export type Phase2Dossier = {
   domain: string;
   generated_at: string;
+  mode?: InvestigationMode;
+  target_label?: string;
   mail_posture: Phase2MailPosture;
   tasks: Phase2Task[];
   services: Phase2Service[];
   people: Phase2Person[];
+};
+
+export type InvestigatePayload = {
+  mode: InvestigationMode;
+  domain?: string;
+  emails?: string[];
+  usernames?: string[];
+  scan_depth?: ScanDepth;
+  analyze: "none" | "local" | "claude";
 };
 
 export type JobSnapshot = {
@@ -393,6 +428,11 @@ export type JobSnapshot = {
   kind: string;
   status: "queued" | "running" | "completed" | "failed";
   domain: string | null;
+  target_label?: string | null;
+  mode?: InvestigationMode | null;
+  scan_depth?: ScanDepth | null;
+  email_seed_count?: number | null;
+  username_seed_count?: number | null;
   run_id: string | null;
   analyze: string;
   provider: string | null;
